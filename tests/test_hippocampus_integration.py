@@ -156,7 +156,7 @@ def test_repeated_negative_feedback_never_promotes(hippo, clock):
     assert rec.base_strength < 0.01
     assert rec.kind == "episodic"
     clock.advance(2500.0)  # за порогом promote_min_age_s
-    report = hippo.consolidate(save=False)
+    report = hippo.consolidate()
     assert report.promoted_to_semantic == 0
     assert hippo.recall("korvex kv315", k=3).abstained
 
@@ -204,7 +204,7 @@ def test_consolidation_promotes_to_semantic(hippo, clock):
     for _ in range(5):
         hippo.remember("korvex kv501 qixa")
     clock.advance(2500.0)  # > promote_min_age_s
-    report = hippo.consolidate(save=False)
+    report = hippo.consolidate()
     assert report.promoted_to_semantic >= 1
     assert hippo.store.get(res.memory_id).kind == "semantic"
 
@@ -214,7 +214,7 @@ def test_associative_link_surfaces_partner(hippo):
     b = hippo.remember("plimso pt602 suvat").memory_id
     assert hippo.link_memories([a, b], strength=2.0) > 0
     # связи живут в eligibility-логе до первого «сна»; консолидируем и проверяем
-    hippo.consolidate(save=False)
+    hippo.consolidate()
     packet = hippo.recall("plimso pt602", k=5)
     texts = {it.memory_id: it for it in packet.items}
     assert b in texts
@@ -227,8 +227,8 @@ def test_associative_link_surfaces_partner(hippo):
 def test_related_ids_create_edges_after_consolidation(hippo):
     c = hippo.remember("korvex kv701 qixa", force_new=True).memory_id
     d = hippo.remember("wreniq wf702 suvat", force_new=True, related_ids=(c,)).memory_id
-    assert hippo.eligibility.pending_count >= 1
-    hippo.consolidate(save=False)
+    assert hippo.pending_eligibility >= 1
+    hippo.consolidate()
     assert hippo.network.edge_count > 0
     assert c != d
 
@@ -239,7 +239,7 @@ def test_save_reload_identical_behaviour(tmp_path, tiny_cfg, clock):
     a = h1.remember("korvex kv801 qixa").memory_id
     b = h1.remember("plimso pt802 suvat").memory_id
     h1.link_memories([a, b], strength=1.5)
-    h1.consolidate()  # коммит связей + снапшот
+    h1.consolidate()  # коммит связей; состояние уже в БД
     edges_before = h1.stats()["edges"]
     q = "plimso pt802"
     before = h1.recall(q, k=5)

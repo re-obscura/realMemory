@@ -4,13 +4,16 @@
 L2-ассоциации, политики новизны/затухания и SQLite-хранилище в единые пути
 remember/recall/feedback/consolidate. Контракт: docs/CONTRACTS.md.
 
-Восстановление состояния при открытии: L1-бакеты и юнит-индекс всегда
-перестраиваются из БД (детерминированно); рёбра L2, eligibility-лог и счётчики —
-из snapshot.pkl.
+Все мутабельное состояние (рёбра L2, eligibility-лог, журнал, счётчики) живёт
+в SQLite и пишется сквозь — несколько процессов (MCP-сервер + хуки) работают
+с одной базой без потери состояния. При открытии перестраиваются только
+производные структуры: L1-бакеты и юнит-индекс — из БД детерминированно,
+CSR-кэш рёбер L2 — из таблицы edges.
 """
 from __future__ import annotations
 
 import dataclasses
+import json
 import pickle
 import re
 import time as _time
@@ -28,7 +31,6 @@ from .encoding.embedder import EmbeddingProvider, HashingEmbedder
 from .encoding.sdr import SDREncoder
 from .policies.decay import reinforce_values, retention, should_promote, weaken_value
 from .policies.novelty import gate
-from .store.journal import Journal
 from .store.sqlite_store import MemoryStore
 from .timeprov import SystemClock, TimeProvider
 from .types import (
@@ -46,10 +48,9 @@ from .types import (
     WriteResult,
 )
 
-SNAPSHOT_VERSION = 1
 _DB_NAME = "memory.db"
-_SNAPSHOT_NAME = "snapshot.pkl"
-_JOURNAL_NAME = "journal.jsonl"
+_LEGACY_SNAPSHOT = "snapshot.pkl"
+_LEGACY_JOURNAL = "journal.jsonl"
 
 _NAMESPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
@@ -64,6 +65,20 @@ def _resolve_root(path: str | Path, namespace: str | None) -> Path:
             "namespace: 1–64 символа из [A-Za-z0-9_.-], первый — буква или цифра"
         )
     return root / namespace
+
+
+class _EventLog:
+    """Фасад над таблицей events: прежний вызов append(event_type, **fields)."""
+
+    def __init__(self, store: MemoryStore, clock: TimeProvider) -> None:
+        self._store = store
+        self._clock = clock
+
+    def append(self, event_type: str, **fields: Any) -> None:
+        self._store.event_append(event_type, fields, ts=float(self._clock.now()))
+
+    def count(self) -> int:
+        return self._store.event_count()
 
 
 class Hippocampus:
@@ -88,10 +103,17 @@ class Hippocampus:
                 f"dim эмбеддера ({self.embedder.dim}) не совпадает с config.dim ({self.config.dim})"
             )
         self.store = MemoryStore(self.path / _DB_NAME, self.config.dim)
+        if verify_embedder:
+            # False для инструментов без эмбеддингов (хуки сна/брифа): они не
+            # порождают векторов и не должны спорить с боевым эмбеддером базы
+            self._check_embedder_identity()
+        self._check_db_config()
+        self._migrate_legacy_files()
         self.sdr_encoder = SDREncoder(
             self.config.dim, self.config.n_units, self.config.k_sparse, self.config.sdr_seed
         )
         self.index = SDRVotingIndex(self.config.n_units, bucket_cap=self.config.bucket_cap)
+        # network — чистый in-memory CSR-кэш таблицы edges; истина в БД
         self.network = AssemblyNetwork(
             self.config.n_units,
             edge_min_weight=self.config.edge_min_weight,
@@ -99,18 +121,11 @@ class Hippocampus:
             seed=self.config.sdr_seed + 1,
             max_pairs_per_bind=self.config.max_pairs_per_bind,
         )
-        self.eligibility = EligibilityLog(self.config.tau_eligibility)
-        self.journal = Journal(self.path / _JOURNAL_NAME)
-        if verify_embedder:
-            # False для инструментов без эмбеддингов (хуки сна/брифа): они не
-            # порождают векторов и не должны спорить с боевым эмбеддером базы
-            self._check_embedder_identity()
+        self.journal = _EventLog(self.store, self.clock)
         self._rng = np.random.default_rng(self.config.sdr_seed + 2)
         self._unit_index: dict[int, set[int]] = {}
-        self._decision_counts: dict[str, int] = {a.value: 0 for a in DecisionAction}
-        self._stats: dict[str, Any] = {"writes": 0, "recalls": 0, "sum_recall_ms": 0.0}
-        self._pending_rewards = 0
-        self._load_state()
+        self._edges_rev_seen = -1
+        self._rebuild_volatile()
 
     # -- конструирование ---------------------------------------------------------
 
@@ -146,7 +161,10 @@ class Hippocampus:
         if stored is None:
             if self.store.count() > 0:
                 # база до введения маркировки — принимаем текущий эмбеддер как есть
-                self.journal.append("embedder_identity_adopted", name=self.embedder.name)
+                self.store.event_append(
+                    "embedder_identity_adopted", {"name": self.embedder.name},
+                    ts=float(self.clock.now()),
+                )
             self.store.set_meta("embedder", self.embedder.name)
             return
         if stored != self.embedder.name:
@@ -155,6 +173,98 @@ class Hippocampus:
                 f"'{self.embedder.name}'. Старые и новые эмбеддинги несравнимы; "
                 "откройте базу исходным эмбеддером или начните новую директорию памяти."
             )
+
+    def _check_db_config(self) -> None:
+        """Геометрия SDR/размерность фиксируются в базе при первом открытии;
+        открытие с другой геометрией дало бы невалидные бакеты и рёбра."""
+        stored = self.store.get_meta("config")
+        mine = json.dumps(self.config.snapshot_fields(), sort_keys=True)
+        if stored is None:
+            self.store.set_meta("config", mine)
+            return
+        try:
+            other = json.loads(stored)
+        except ValueError:
+            other = {}
+        for key in ("dim", "n_units", "sdr_seed"):
+            if key in other and other[key] != getattr(self.config, key):
+                raise RuntimeError(
+                    f"конфиг не совпадает с базой {self.path} по полю {key}: "
+                    f"в базе {other[key]}, открывается с {getattr(self.config, key)}"
+                )
+
+    def _migrate_legacy_files(self) -> None:
+        """Однократный перенос наследия v0.3 (journal.jsonl, snapshot.pkl) в БД."""
+        jp = self.path / _LEGACY_JOURNAL
+        if jp.exists() and self.store.get_meta("journal_imported") is None:
+            imported = 0
+            for line in jp.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                etype = str(event.pop("type", "unknown"))
+                ts = float(event.pop("ts", event.pop("t", 0.0)))
+                if etype == "write":
+                    # до v0.4 журналировались только вставки (гейт CREATE)
+                    event.setdefault("action", "create")
+                self.store.event_append(etype, event, ts=ts)
+                imported += 1
+            self.store.set_meta("journal_imported", "1")
+            jp.rename(jp.with_name(jp.name + ".imported"))
+            self.store.event_append("legacy_journal_imported",
+                                    {"events": imported}, ts=float(self.clock.now()))
+
+        sp = self.path / _LEGACY_SNAPSHOT
+        if sp.exists() and self.store.get_meta("snapshot_imported") is None:
+            try:
+                with sp.open("rb") as f:
+                    payload = pickle.load(f)
+                net = payload.get("network", {})
+                keys = np.asarray(net.get("keys"), dtype=np.int64).reshape(-1)
+                ws = np.asarray(net.get("weights"), dtype=np.float32).reshape(-1)
+                last_tick = net.get("last_tick")
+                self.store.edges_import(keys, ws, None if last_tick is None else float(last_tick))
+                for src, dst, strength, created_at, source_ids in (
+                    payload.get("eligibility", {}).get("events", [])
+                ):
+                    self.store.elig_add(np.asarray(src, dtype=np.int32),
+                                        np.asarray(dst, dtype=np.int32),
+                                        float(strength), float(created_at),
+                                        [int(i) for i in source_ids])
+                status: dict[str, Any] = {"edges": int(keys.size)}
+            except Exception as exc:  # noqa: BLE001 - битый снапшот не должен блокировать базу
+                status = {"error": str(exc)}
+            self.store.set_meta("snapshot_imported", "1")
+            sp.rename(sp.with_name(sp.name + ".imported"))
+            self.store.event_append("legacy_snapshot_imported", status,
+                                    ts=float(self.clock.now()))
+
+    def _rebuild_volatile(self) -> None:
+        """Производные структуры при открытии: L1-бакеты, юнит-индекс, CSR рёбер."""
+        for rec in self.store.iter_active():
+            self.index.write(rec.sdr, int(rec.id))
+            for u in rec.sdr.tolist():
+                self._unit_index.setdefault(int(u), set()).add(int(rec.id))
+        self._reload_network_cache()
+
+    def _reload_network_cache(self) -> None:
+        keys, ws = self.store.edges_load()
+        tick = self.store.get_meta("last_edge_tick")
+        self.network.load_state_dict({
+            "keys": keys,
+            "weights": ws,
+            "last_tick": float(tick) if tick is not None else None,
+        })
+        self._edges_rev_seen = self.store.edges_rev()
+
+    def _sync_network_cache(self) -> None:
+        """Чужие процессы могли доконсолидировать рёбра — обновляем кэш по версии."""
+        if self.store.edges_rev() != self._edges_rev_seen:
+            self._reload_network_cache()
 
     def _encode(self, text: str, *, query: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """Кодирование текста. Для поисковых запросов используется embed_query(),
@@ -213,7 +323,6 @@ class Hippocampus:
         self.index.write(sdr, mid)
         for u in np.asarray(sdr).tolist():
             self._unit_index.setdefault(int(u), set()).add(mid)
-        self.journal.append("write", id=mid, kind=rec.kind, chars=len(text), t=now)
         return mid
 
     def _sample_pairs(self, ua: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -233,7 +342,8 @@ class Hippocampus:
         ii, jj = self._sample_pairs(ua, ub)
         if ii.size == 0:
             return 0
-        self.eligibility.add(ii, jj, strength, now, source_ids)
+        # write-through: bind сразу в БД, потерять его нельзя даже при падении процесса
+        self.store.elig_add(ii, jj, strength, now, source_ids)
         return int(ii.size)
 
     def _reinforce(self, memory_id: int, now: float) -> None:
@@ -247,6 +357,11 @@ class Hippocampus:
             else rec.kind
         )
         self.store.update_trace(memory_id, base, count, now, kind=new_kind)
+
+    @property
+    def pending_eligibility(self) -> int:
+        """Незакоммиченных bind'ов в логе (видны всем процессам)."""
+        return self.store.elig_pending()
 
     # -- запись --------------------------------------------------------------------
 
@@ -306,8 +421,8 @@ class Hippocampus:
                 self._bind_sdrs(sdr, self._sdr_of(rid), strength=0.5, now=now, source_ids=(mid, rid))
             created = True
 
-        self._decision_counts[action.value] += 1
-        self._stats["writes"] += 1
+        self.journal.append("write", id=mid, kind=kind, action=action.value,
+                            created=created, chars=len(text), t=now)
         return WriteResult(memory_id=mid, decision=decision, created=created)
 
     def _sdr_of(self, memory_id: int) -> np.ndarray:
@@ -393,6 +508,7 @@ class Hippocampus:
         # волна ассоциаций: spread от SDR топ-следов по пластичным рёбрам;
         # сигнал связи — достижимые юниты, поэтому косинусный фильтр не применяется
         if 0 < len(items) < k and sdr.size:
+            self._sync_network_cache()
             seeds = np.concatenate([it[3].sdr for it in items[: min(3, len(items))]])
             units, _scores = self.network.spread(
                 seeds,
@@ -437,8 +553,6 @@ class Hippocampus:
             for c, cos, ret, rec, source in items
         )
         latency_ms = (_time.perf_counter() - t0) * 1000.0
-        self._stats["recalls"] += 1
-        self._stats["sum_recall_ms"] += latency_ms
         packet = RecallPacket(query=query, items=out, abstained=len(out) == 0,
                               latency_ms=latency_ms)
         # наблюдаемость: каждое обращение — для последующего анализа трендов
@@ -462,8 +576,10 @@ class Hippocampus:
         if not -1.0 <= reward <= 1.0:
             raise ValueError("reward должен быть в [-1, 1]")
         uniq = tuple(dict.fromkeys(int(i) for i in ids))
-        touched = self.eligibility.reward(uniq, reward)
-        self._pending_rewards += touched
+        factor = max(0.0, 1.0 + reward)
+        touched = self.store.elig_reward(uniq, factor)
+        if touched > 0:
+            self.store.bump_meta_int("pending_reward_touches", touched)
         now = float(self.clock.now())
         reinforced = weakened = 0
         for i in uniq:
@@ -486,41 +602,65 @@ class Hippocampus:
         )
         return reinforced + weakened
 
-    def consolidate(self, save: bool = True) -> ConsolidationReport:
+    def consolidate(self) -> ConsolidationReport:
+        """«Сон»: выкачать eligibility в стабильные рёбра (с reward-усилением и
+        распадом), повысить дозревшие эпизоды до семантических, записать метрики.
+        Всё состояние уже в БД, отдельного сохранения не требуется; параллельные
+        консолидации других процессов сериализуются транзакцией."""
         t0 = _time.perf_counter()
         now = float(self.clock.now())
-        e0 = self.network.edge_count
-        src, dst, w = self.eligibility.commit(now)
-        self.network.commit_eligibility(src, dst, w, now)
-        e1 = self.network.edge_count
-        edges_pruned = max(0, e0 + int(w.size) - e1)
-        promoted = 0
+        rewards_applied = self.store.consume_meta_int("pending_reward_touches")
+        rows = self.store.elig_drain()
+        committed = pruned = 0
+        if rows:
+            staging = EligibilityLog(self.config.tau_eligibility)
+            staging.load_state_dict({
+                "tau": self.config.tau_eligibility,
+                "events": rows,
+            })
+            src, dst, w = staging.commit(now)
+            committed, pruned = self.store.edges_apply(
+                src, dst, w, now,
+                tau=self.config.tau_edge_stable,
+                min_weight=self.config.edge_min_weight,
+                stride=self.config.n_units,
+            )
+        else:
+            # часы сети двигаются даже пустым сном: слабые рёбра обязаны угасать
+            committed, pruned = self.store.edges_apply(
+                np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.float32),
+                now, tau=self.config.tau_edge_stable,
+                min_weight=self.config.edge_min_weight, stride=self.config.n_units,
+            )
+        self._reload_network_cache()
+
+        promote_ids: list[int] = []
         for rec in self.store.iter_active():
             if should_promote(rec.kind, rec.reinforced_count, rec.created_at, now, self.config):
+                promote_ids.append(int(rec.id))
+        for rid in promote_ids:
+            promoted_rec = self.store.get(rid)
+            if promoted_rec is not None:
                 self.store.update_trace(
-                    rec.id, rec.base_strength, rec.reinforced_count, rec.last_reinforced_at,
-                    kind=KIND_SEMANTIC,
+                    rid, promoted_rec.base_strength, promoted_rec.reinforced_count,
+                    promoted_rec.last_reinforced_at, kind=KIND_SEMANTIC,
                 )
-                promoted += 1
-        rewards_applied = self._pending_rewards
-        self._pending_rewards = 0
         report = ConsolidationReport(
-            edges_committed=int(w.size),
-            edges_pruned=edges_pruned,
-            promoted_to_semantic=promoted,
+            edges_committed=committed,
+            edges_pruned=pruned,
+            promoted_to_semantic=len(promote_ids),
             rewards_applied=rewards_applied,
             elapsed_ms=(_time.perf_counter() - t0) * 1000.0,
         )
+        self.store.set_meta("last_consolidate_at", repr(now))
         self.journal.append("consolidate", **dataclasses.asdict(report))
         self.journal.append("metrics", **self.metrics_snapshot(now=now))
-        if save:
-            self.save()
         return report
 
     def metrics_snapshot(self, now: float | None = None) -> dict[str, Any]:
         """Полный срез состояния для анализа «со временем»: счётчики, гистерезис
         затухания, возраст следов. Вызывается на каждом consolidate(); те же
-        данные доступны по требованию (тул memory_report / CLI report)."""
+        данные доступны по требованию (тул dream_log / CLI report)."""
         now = float(now) if now is not None else float(self.clock.now())
         rets: list[float] = []
         ages: list[float] = []
@@ -541,67 +681,31 @@ class Hippocampus:
             "index_load_factor": round(self.index.load_factor(), 3),
         }
 
-    # -- статистика и снапшоты --------------------------------------------------------
+    # -- статистика ------------------------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
-        recalls = max(1, self._stats["recalls"])
+        """Глобальная статистика из БД: одинакова для всех процессов в любой момент."""
+        decisions: dict[str, int] = {a.value: 0 for a in DecisionAction}
+        for act, n in self.store.gate_decisions().items():
+            decisions[act] = decisions.get(act, 0) + n
+        recalls, avg_recall_ms = self.store.recall_stats()
+        edge_count, total_weight = self.store.edges_stats(
+            float(self.clock.now()), self.config.tau_edge_stable
+        )
         return {
             "memories_active": self.store.count(status=STATUS_ACTIVE),
             "memories_superseded": self.store.count(status="superseded"),
             "kind_episodic": self.store.count(kind=KIND_EPISODIC),
             "kind_semantic": self.store.count(kind=KIND_SEMANTIC),
-            "edges": self.network.edge_count,
-            "total_edge_weight": round(self.network.total_weight, 4),
-            "pending_eligibility": self.eligibility.pending_count,
-            "decisions": dict(self._decision_counts),
-            "writes": self._stats["writes"],
-            "recalls": self._stats["recalls"],
-            "avg_recall_ms": round(self._stats["sum_recall_ms"] / recalls, 3),
-            "journal_events": self.journal.count(),
+            "edges": edge_count,
+            "total_edge_weight": total_weight,
+            "pending_eligibility": self.store.elig_pending(),
+            "decisions": decisions,
+            "writes": sum(decisions.values()),
+            "recalls": recalls,
+            "avg_recall_ms": avg_recall_ms,
+            "journal_events": self.store.event_count(),
         }
-
-    def save(self) -> None:
-        payload = {
-            "version": SNAPSHOT_VERSION,
-            "config": self.config.snapshot_fields(),
-            "network": self.network.state_dict(),
-            "eligibility": self.eligibility.state_dict(),
-            "stats": dict(self._stats),
-            "decisions": dict(self._decision_counts),
-            "pending_rewards": self._pending_rewards,
-        }
-        final = self.path / _SNAPSHOT_NAME
-        tmp = final.with_suffix(".pkl.tmp")
-        with tmp.open("wb") as f:
-            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-        tmp.replace(final)
-        self.journal.append("snapshot", t=float(self.clock.now()))
-
-    def _load_state(self) -> None:
-        for rec in self.store.iter_active():
-            self.index.write(rec.sdr, int(rec.id))
-            for u in rec.sdr.tolist():
-                self._unit_index.setdefault(int(u), set()).add(int(rec.id))
-        snap_path = self.path / _SNAPSHOT_NAME
-        if not snap_path.exists():
-            return
-        try:
-            with snap_path.open("rb") as f:
-                payload = pickle.load(f)
-        except (pickle.UnpicklingError, EOFError, OSError) as exc:
-            raise RuntimeError(f"повреждён снапшот {snap_path}: {exc}") from exc
-        if payload.get("version") != SNAPSHOT_VERSION:
-            raise RuntimeError("несовместимая версия снапшота")
-        cfg = payload.get("config", {})
-        for key in ("dim", "n_units", "sdr_seed"):
-            if key in cfg and cfg[key] != getattr(self.config, key):
-                raise RuntimeError(f"конфиг не совпадает со снапшотом по полю {key}")
-        self.network.load_state_dict(payload["network"])
-        self.eligibility.load_state_dict(payload["eligibility"])
-        stats = payload.get("stats", {})
-        self._stats.update({k: stats[k] for k in self._stats if k in stats})
-        self._decision_counts.update(payload.get("decisions", {}))
-        self._pending_rewards = int(payload.get("pending_rewards", 0))
 
 
 def _assoc_cos_floor(cos: float) -> float:

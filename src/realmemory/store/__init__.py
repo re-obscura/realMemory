@@ -1,5 +1,4 @@
-"""Хранилище: SQLite для следов + append-only журнал пластичности."""
-from .journal import Journal
+"""Хранилище: SQLite — единый источник истины для всех процессов."""
 from .sqlite_store import MemoryStore, StorageError
 
-__all__ = ["Journal", "MemoryStore", "StorageError"]
+__all__ = ["MemoryStore", "StorageError"]

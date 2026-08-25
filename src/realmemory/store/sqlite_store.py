@@ -1,7 +1,17 @@
-"""SQLite-хранилище следов. Контракт: docs/CONTRACTS.md.
+"""SQLite-хранилище: следы, рёбра L2, eligibility, события. Контракт: docs/CONTRACTS.md.
 
-WAL-режим, один процесс на базу (блокировка потоков внутри класса).
-Сериализация: embedding -> float32 blob, sdr -> int32 blob (отсортирован).
+Единый источник истины для всех процессов: долгоживущий MCP-сервер и
+краткоживущие хуки читают и пишут одну базу. WAL + busy_timeout +
+BEGIN IMMEDIATE на мутациях исключают потерю состояния «кто последний
+записал снапшот» — снапшотных файлов больше нет.
+
+Схема:
+  memories      следы (embedding -> float32 blob, sdr -> int32 blob отсортирован)
+  edges         стабильные рёбра L2, key = src*n_units + dst (layout dict AssemblyNetwork)
+  eligibility   незакоммиченные bind'ы (src/dst — int32 blob одного события)
+  elig_sources  следы-источники события (для reward-матчинга)
+  events        журнал пластичности (бывший journal.jsonl): аудит и статистика
+  db_meta       маркер эмбеддера, конфиг, служебные счётчики/метки
 """
 from __future__ import annotations
 
@@ -9,37 +19,74 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 
 from ..types import STATUS_ACTIVE, MemoryRecord
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    status TEXT NOT NULL,
-    meta TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    sdr BLOB NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    reinforced_count INTEGER NOT NULL DEFAULT 0,
-    last_reinforced_at REAL NOT NULL,
-    base_strength REAL NOT NULL DEFAULT 1.0,
-    valid_from REAL NOT NULL,
-    valid_to REAL,
-    superseded_by INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
-
-CREATE TABLE IF NOT EXISTS db_meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"""
+# Схема списком стейтментов: executescript() внутри BEGIN не годится
+# (он неявно коммитит транзакцию).
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        meta TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        sdr BLOB NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        reinforced_count INTEGER NOT NULL DEFAULT 0,
+        last_reinforced_at REAL NOT NULL,
+        base_strength REAL NOT NULL DEFAULT 1.0,
+        valid_from REAL NOT NULL,
+        valid_to REAL,
+        superseded_by INTEGER
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
+    """
+    CREATE TABLE IF NOT EXISTS edges (
+        key INTEGER PRIMARY KEY,
+        w REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS eligibility (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        src BLOB NOT NULL,
+        dst BLOB NOT NULL,
+        strength REAL NOT NULL,
+        created_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS elig_sources (
+        seq INTEGER NOT NULL REFERENCES eligibility(seq) ON DELETE CASCADE,
+        mem_id INTEGER NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_elig_sources_mem ON elig_sources(mem_id)",
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        type TEXT NOT NULL,
+        data TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)",
+    """
+    CREATE TABLE IF NOT EXISTS db_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+)
 
 _INSERT_SQL = (
     "INSERT INTO memories(text,kind,status,meta,embedding,sdr,"
@@ -63,7 +110,6 @@ def _pack_f32(v: np.ndarray) -> bytes:
 
 def _pack_i32(v: np.ndarray) -> bytes:
     return np.asarray(v, dtype=np.int32).tobytes()
-
 
 
 def _row_to_record(row: tuple, dim: int) -> MemoryRecord:
@@ -95,14 +141,30 @@ class MemoryStore:
         self._lock = threading.Lock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+            self._conn = sqlite3.connect(str(self.path), check_same_thread=False,
+                                         isolation_level=None)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
-            self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            with self._txn() as con:
+                for stmt in _SCHEMA_STATEMENTS:
+                    con.execute(stmt)
         except sqlite3.DatabaseError as exc:
             raise StorageError(f"не удалось открыть {self.path}: {exc}") from exc
+
+    @contextmanager
+    def _txn(self):
+        """Мутации в BEGIN IMMEDIATE: захват блокировки записи до конца блока.
+        Конкурентные процессы выстраиваются по busy_timeout вместо потери правок."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def __enter__(self) -> MemoryStore:  # noqa: PYI034
         return self
@@ -117,30 +179,26 @@ class MemoryStore:
             finally:
                 self._conn.close()
 
-    # -- запись ---------------------------------------------------------------
+    # -- следы: запись -----------------------------------------------------------
 
     def insert(self, rec: MemoryRecord) -> int:
-        with self._lock:
-            try:
-                cur = self._conn.execute(
-                    _INSERT_SQL,
-                    (
-                        rec.text, rec.kind, rec.status, json.dumps(rec.meta, ensure_ascii=False),
-                        _pack_f32(rec.embedding), _pack_i32(rec.sdr),
-                        float(rec.created_at), float(rec.updated_at), int(rec.reinforced_count),
-                        float(rec.last_reinforced_at), float(rec.base_strength),
-                        float(rec.valid_from),
-                        None if rec.valid_to is None else float(rec.valid_to),
-                        rec.superseded_by,
-                    ),
-                )
-                rowid = cur.lastrowid
-                self._conn.commit()
-                if rowid is None:  # pragma: no cover - не бывает после успешного INSERT
-                    raise StorageError("INSERT не вернул rowid")
-                return int(rowid)
-            except sqlite3.DatabaseError as exc:
-                raise StorageError(f"вставка не удалась: {exc}") from exc
+        with self._txn() as con:
+            cur = con.execute(
+                _INSERT_SQL,
+                (
+                    rec.text, rec.kind, rec.status, json.dumps(rec.meta, ensure_ascii=False),
+                    _pack_f32(rec.embedding), _pack_i32(rec.sdr),
+                    float(rec.created_at), float(rec.updated_at), int(rec.reinforced_count),
+                    float(rec.last_reinforced_at), float(rec.base_strength),
+                    float(rec.valid_from),
+                    None if rec.valid_to is None else float(rec.valid_to),
+                    rec.superseded_by,
+                ),
+            )
+            rowid = cur.lastrowid
+        if rowid is None:  # pragma: no cover - не бывает после успешного INSERT
+            raise StorageError("INSERT не вернул rowid")
+        return int(rowid)
 
     def update_trace(
         self,
@@ -150,44 +208,37 @@ class MemoryStore:
         last_reinforced_at: float,
         kind: str | None = None,
     ) -> None:
-        with self._lock:
-            sets = ("base_strength=?, reinforced_count=?, last_reinforced_at=?, updated_at=?")
-            params: list = [float(base_strength), int(reinforced_count),
-                            float(last_reinforced_at), float(last_reinforced_at)]
-            if kind is not None:
-                sets += ", kind=?"
-                params.append(kind)
-            params.append(int(memory_id))
-            try:
-                self._conn.execute(f"UPDATE memories SET {sets} WHERE id=?", params)
-                self._conn.commit()
-            except sqlite3.DatabaseError as exc:
-                raise StorageError(f"обновление не удалось: {exc}") from exc
+        sets = "base_strength=?, reinforced_count=?, last_reinforced_at=?, updated_at=?"
+        params: list = [float(base_strength), int(reinforced_count),
+                        float(last_reinforced_at), float(last_reinforced_at)]
+        if kind is not None:
+            sets += ", kind=?"
+            params.append(kind)
+        params.append(int(memory_id))
+        with self._txn() as con:
+            con.execute(f"UPDATE memories SET {sets} WHERE id=?", params)
 
     def mark_superseded(self, memory_id: int, by_id: int, when: float) -> None:
-        with self._lock:
-            try:
-                self._conn.execute(
-                    "UPDATE memories SET status='superseded', valid_to=?, superseded_by=? WHERE id=?",
-                    (float(when), int(by_id), int(memory_id)),
-                )
-                self._conn.commit()
-            except sqlite3.DatabaseError as exc:
-                raise StorageError(f"суперсед не удался: {exc}") from exc
+        with self._txn() as con:
+            con.execute(
+                "UPDATE memories SET status='superseded', valid_to=?, superseded_by=? WHERE id=?",
+                (float(when), int(by_id), int(memory_id)),
+            )
 
     def adjust_base(self, memory_id: int, base_strength: float, updated_at: float) -> None:
         """Ослабление следа без сброса таймера подкрепления (негативный feedback)."""
-        with self._lock:
-            try:
-                self._conn.execute(
-                    "UPDATE memories SET base_strength=?, updated_at=? WHERE id=?",
-                    (float(base_strength), float(updated_at), int(memory_id)),
-                )
-                self._conn.commit()
-            except sqlite3.DatabaseError as exc:
-                raise StorageError(f"ослабление не удалось: {exc}") from exc
+        with self._txn() as con:
+            con.execute(
+                "UPDATE memories SET base_strength=?, updated_at=? WHERE id=?",
+                (float(base_strength), float(updated_at), int(memory_id)),
+            )
 
-    # -- мета базы --------------------------------------------------------------
+    def max_updated_at(self) -> float | None:
+        with self._lock:
+            row = self._conn.execute("SELECT MAX(updated_at) FROM memories").fetchone()
+        return None if row is None or row[0] is None else float(row[0])
+
+    # -- мета базы -----------------------------------------------------------------
 
     def get_meta(self, key: str) -> str | None:
         with self._lock:
@@ -197,18 +248,35 @@ class MemoryStore:
         return None if row is None else str(row[0])
 
     def set_meta(self, key: str, value: str) -> None:
-        with self._lock:
-            try:
-                self._conn.execute(
-                    "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (key, str(value)),
-                )
-                self._conn.commit()
-            except sqlite3.DatabaseError as exc:
-                raise StorageError(f"запись db_meta не удалась: {exc}") from exc
+        with self._txn() as con:
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value)),
+            )
 
-    # -- чтение -----------------------------------------------------------------
+    def bump_meta_int(self, key: str, delta: int = 1) -> int:
+        """Атомарный инкремент целочисленного счётчика в db_meta; возвращает новое значение."""
+        with self._txn() as con:
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE "
+                "SET value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
+                (key, str(delta), int(delta)),
+            )
+            (val,) = con.execute("SELECT value FROM db_meta WHERE key=?", (key,)).fetchone()
+        return int(val)
+
+    def consume_meta_int(self, key: str) -> int:
+        """Прочитать и обнулить счётчик (pending_rewards между «снами»)."""
+        with self._txn() as con:
+            row = con.execute("SELECT value FROM db_meta WHERE key=?", (key,)).fetchone()
+            if row is None:
+                return 0
+            con.execute("UPDATE db_meta SET value='0' WHERE key=?", (key,))
+        return int(row[0])
+
+    # -- чтение следов ---------------------------------------------------------------
 
     def get(self, memory_id: int) -> MemoryRecord | None:
         with self._lock:
@@ -281,3 +349,221 @@ class MemoryStore:
                 (int(limit),),
             ).fetchall()
         return [_row_to_record(r, self.dim) for r in rows]
+
+    # -- рёбра L2 ---------------------------------------------------------------------
+
+    def edges_rev(self) -> int:
+        """Версия рёбер: растёт при любой их мутации (инвалидация CSR-кэша фасада)."""
+        val = self.get_meta("edges_rev")
+        return int(val) if val is not None else 0
+
+    def edges_load(self) -> tuple[np.ndarray, np.ndarray]:
+        """Все рёбра как отсортированные (keys int64, weights float32) для CSR-кэша."""
+        with self._lock:
+            rows = self._conn.execute("SELECT key, w FROM edges ORDER BY key").fetchall()
+        if not rows:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
+        keys = np.fromiter((r[0] for r in rows), dtype=np.int64, count=len(rows))
+        ws = np.fromiter((r[1] for r in rows), dtype=np.float32, count=len(rows))
+        return keys, ws
+
+    def edges_apply(
+        self,
+        src: np.ndarray,
+        dst: np.ndarray,
+        w: np.ndarray,
+        now: float,
+        tau: float,
+        min_weight: float,
+        stride: int,
+    ) -> tuple[int, int]:
+        """Консолидационная запись рёбер одним транзакционным шагом: распад всех
+        стабильных весов за (now - last_edge_tick), обрезка слабых, вливание батча
+        (аккумуляция в существующие ключи), тик часов.
+
+        Возвращает (число влитых пар, число обрезанных рёбер). Вызовы разных
+        процессов сериализуются BEGIN IMMEDIATE; Δt считается от last_edge_tick
+        после захвата блокировки — двойного распада нет.
+        """
+        pairs = [
+            (int(i) * int(stride) + int(j), float(wi))
+            for i, j, wi in zip(np.asarray(src).tolist(), np.asarray(dst).tolist(),
+                                np.asarray(w).tolist())
+        ]
+        with self._txn() as con:
+            tick_row = con.execute(
+                "SELECT value FROM db_meta WHERE key='last_edge_tick'"
+            ).fetchone()
+            pruned = 0
+            if tick_row is not None:
+                tick = float(tick_row[0])
+                if now > tick:
+                    factor = float(np.exp(-(now - tick) / float(tau)))
+                    if factor < 1.0:
+                        con.execute("UPDATE edges SET w = w * ?", (factor,))
+                    con.execute("DELETE FROM edges WHERE w < ?", (float(min_weight),))
+                    pruned = int(con.execute("SELECT changes()").fetchone()[0])
+            if pairs:
+                con.executemany(
+                    "INSERT INTO edges(key, w) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET w = w + excluded.w",
+                    pairs,
+                )
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES('last_edge_tick', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (repr(float(now)),),
+            )
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES('edges_rev', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)"
+            )
+        return len(pairs), pruned
+
+    def edges_import(self, keys: np.ndarray, ws: np.ndarray, last_tick: float | None) -> None:
+        """Прямая вставка рёбер без распада (миграция legacy-снапшота).
+        Часы сети переносятся из снапшота, чтобы старые веса не омолодились."""
+        pairs = [
+            (int(k), float(wv))
+            for k, wv in zip(np.asarray(keys).reshape(-1).tolist(),
+                             np.asarray(ws).reshape(-1).tolist())
+        ]
+        with self._txn() as con:
+            if pairs:
+                con.executemany("INSERT OR REPLACE INTO edges(key, w) VALUES(?, ?)", pairs)
+            if last_tick is not None:
+                con.execute(
+                    "INSERT INTO db_meta(key, value) VALUES('last_edge_tick', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (repr(float(last_tick)),),
+                )
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES('edges_rev', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)"
+            )
+
+    def edges_stats(self, now: float, tau: float) -> tuple[int, float]:
+        """(число рёбер, суммарный эффективный вес с учётом ленивого распада)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(w), 0.0) FROM edges"
+            ).fetchone()
+        tick_val = self.get_meta("last_edge_tick")
+        factor = 1.0
+        if tick_val is not None and now > float(tick_val):
+            factor = float(np.exp(-(now - float(tick_val)) / float(tau)))
+        return int(row[0]), round(float(row[1]) * factor, 4)
+
+    # -- eligibility -------------------------------------------------------------------
+
+    def elig_add(
+        self,
+        src: np.ndarray,
+        dst: np.ndarray,
+        strength: float,
+        created_at: float,
+        source_ids: Sequence[int],
+    ) -> None:
+        """Write-through staging bind'а: событие сразу в БД, потерять его нельзя."""
+        src_arr = np.asarray(src, dtype=np.int32)
+        dst_arr = np.asarray(dst, dtype=np.int32)
+        ids = sorted({int(i) for i in source_ids})
+        with self._txn() as con:
+            cur = con.execute(
+                "INSERT INTO eligibility(src, dst, strength, created_at) VALUES(?,?,?,?)",
+                (_pack_i32(src_arr), _pack_i32(dst_arr), float(strength), float(created_at)),
+            )
+            seq = cur.lastrowid
+            con.executemany(
+                "INSERT INTO elig_sources(seq, mem_id) VALUES(?, ?)",
+                ((seq, mid) for mid in ids),
+            )
+
+    def elig_reward(self, mem_ids: Sequence[int], factor: float) -> int:
+        """Умножить strength событий, затрагивающих данные следы. Возвращает #событий."""
+        ids = sorted({int(i) for i in mem_ids})
+        if not ids or factor == 1.0:
+            return 0
+        ph = ",".join("?" * len(ids))
+        with self._txn() as con:
+            cur = con.execute(
+                "UPDATE eligibility SET strength = strength * ? WHERE seq IN ("
+                f"SELECT DISTINCT seq FROM elig_sources WHERE mem_id IN ({ph}))",
+                (float(factor), *ids),
+            )
+            return int(cur.rowcount)
+
+    def elig_pending(self) -> int:
+        with self._lock:
+            (n,) = self._conn.execute("SELECT COUNT(*) FROM eligibility").fetchone()
+        return int(n)
+
+    def elig_drain(self) -> list[tuple]:
+        """Выкачать все события (с удалением) в формате EligibilityLog.load_state_dict."""
+        with self._txn() as con:
+            rows = con.execute(
+                "SELECT seq, src, dst, strength, created_at FROM eligibility ORDER BY seq"
+            ).fetchall()
+            if rows:
+                seqs = [r[0] for r in rows]
+                ph = ",".join("?" * len(seqs))
+                src_rows = con.execute(
+                    f"SELECT seq, mem_id FROM elig_sources WHERE seq IN ({ph})", seqs
+                ).fetchall()
+                by_seq: dict[int, list[int]] = {}
+                for seq, mid in src_rows:
+                    by_seq.setdefault(int(seq), []).append(int(mid))
+                con.execute("DELETE FROM eligibility")
+            else:
+                by_seq = {}
+        events = []
+        for seq, src_b, dst_b, strength, created in rows:
+            src = np.frombuffer(src_b, dtype=np.int32)
+            dst = np.frombuffer(dst_b, dtype=np.int32)
+            events.append((src.tolist(), dst.tolist(), float(strength), float(created),
+                           sorted(by_seq.get(int(seq), []))))
+        return events
+
+    # -- события (журнал пластичности) ---------------------------------------------------
+
+    def event_append(self, event_type: str, fields: dict | None = None, ts: float = 0.0) -> None:
+        data = dict(fields or {})
+        with self._txn() as con:
+            con.execute(
+                "INSERT INTO events(ts, type, data) VALUES(?,?,?)",
+                (float(ts), str(event_type), json.dumps(data, ensure_ascii=False)),
+            )
+
+    def event_count(self) -> int:
+        with self._lock:
+            (n,) = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()
+        return int(n)
+
+    def iter_events(self) -> Iterator[dict]:
+        cur = self._conn.execute("SELECT ts, type, data FROM events ORDER BY seq")
+        while True:
+            rows = cur.fetchmany(256)
+            if not rows:
+                break
+            for ts, etype, data in rows:
+                event = {"ts": float(ts), "type": etype}
+                event.update(json.loads(data))
+                yield event
+
+    def gate_decisions(self) -> dict[str, int]:
+        """Счётчики решений гейта из write-событий (устойчиво к рестартам процессов)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT COALESCE(json_extract(data,'$.action'),'unknown'), COUNT(*) "
+                "FROM events WHERE type='write' GROUP BY 1"
+            ).fetchall()
+        return {str(a): int(n) for a, n in rows}
+
+    def recall_stats(self) -> tuple[int, float]:
+        """(число recall-запросов, средняя латентность мс) из журнала событий."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(AVG(json_extract(data,'$.latency_ms')), 0.0) "
+                "FROM events WHERE type='recall'"
+            ).fetchone()
+        return int(row[0]), round(float(row[1]), 3)

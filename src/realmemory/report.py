@@ -2,18 +2,15 @@
 
 Запуск: python -m realmemory.report --path ./rm_data [--json report.json]
 
-Источники: SQLite-база (следы), snapshot.pkl (счётчики гейта, рёбра L2),
-journal.jsonl (история событий: записи, recalls с латентностью/воздержанием,
-feedback, консолидации с метриками). Отчёт отвечает на вопросы: как растёт
-память, как ведёт себя гейт новизны, каковы доля воздержания и латентность,
-что подкрепляется, что угасает, как менялись метрики от консолидации к
-консолидации.
+Источник один: SQLite-база (следы, рёбра L2, журнал событий). Отчёт отвечает
+на вопросы: как растёт память, как ведёт себя гейт новизны, каковы доля
+воздержания и латентность, что подкрепляется, что угасает, как менялись
+метрики от консолидации к консолидации.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import pickle
 import sqlite3
 import time
 from collections import Counter
@@ -21,8 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from .store.journal import Journal
 
 
 def _pctl(sorted_xs: list[float], q: float) -> float:
@@ -32,9 +27,13 @@ def _pctl(sorted_xs: list[float], q: float) -> float:
     return float(sorted_xs[i])
 
 
+def _connect(root: Path) -> sqlite3.Connection:
+    return sqlite3.connect(str(root / "memory.db"))
+
+
 def _index_stats(root: Path) -> dict[str, Any]:
     """Загрузка бакетов L1 по активным следам (прямой подсчёт постингов)."""
-    con = sqlite3.connect(str(root / "memory.db"))
+    con = _connect(root)
     try:
         counts: Counter[int] = Counter()
         traces = 0
@@ -54,7 +53,7 @@ def _index_stats(root: Path) -> dict[str, Any]:
 
 
 def _db_stats(root: Path) -> dict[str, Any]:
-    con = sqlite3.connect(str(root / "memory.db"))
+    con = _connect(root)
     try:
         rows = con.execute(
             "SELECT kind, status, COUNT(*) FROM memories GROUP BY kind, status"
@@ -81,25 +80,42 @@ def _db_stats(root: Path) -> dict[str, Any]:
     }
 
 
-def _snapshot_stats(snap_path: Path) -> dict[str, Any]:
-    if not snap_path.exists():
-        return {}
+def _graph_stats(root: Path) -> dict[str, Any]:
+    """Рёбра L2 и решения гейта новизны — теперь из таблиц базы."""
+    con = _connect(root)
     try:
-        with snap_path.open("rb") as f:
-            payload = pickle.load(f)
-    except Exception as exc:  # noqa: BLE001 - отчёт не должен падать на битом снапшоте
-        return {"snapshot_error": str(exc)}
-    net = payload.get("network", {})
-    keys = net.get("keys")
-    n_edges = int(keys.size) if hasattr(keys, "size") else len(keys or [])
+        (n_edges, total_w) = con.execute(
+            "SELECT COUNT(*), COALESCE(SUM(w), 0.0) FROM edges"
+        ).fetchone()
+        decisions = {
+            str(a): int(n)
+            for a, n in con.execute(
+                "SELECT COALESCE(json_extract(data,'$.action'),'unknown'), COUNT(*) "
+                "FROM events WHERE type='write' GROUP BY 1"
+            ).fetchall()
+        }
+    finally:
+        con.close()
     return {
-        "gate_decisions_all_time": dict(payload.get("decisions", {})),
-        "edges_committed_current": n_edges,
+        "gate_decisions_all_time": decisions,
+        "edges_committed_current": int(n_edges),
+        "total_edge_weight": round(float(total_w), 4),
     }
 
 
-def _journal_stats(journal_path: Path) -> dict[str, Any]:
-    events = list(Journal(journal_path).events())
+def _event_stats(root: Path) -> dict[str, Any]:
+    events = []
+    con = _connect(root)
+    try:
+        for ts, etype, data in con.execute("SELECT ts, type, data FROM events ORDER BY seq"):
+            event = {"ts": float(ts), "type": etype}
+            try:
+                event.update(json.loads(data))
+            except ValueError:
+                pass
+            events.append(event)
+    finally:
+        con.close()
     by_type = Counter(e.get("type") for e in events)
 
     recalls = [e for e in events if e.get("type") == "recall"]
@@ -156,31 +172,22 @@ def build_report(path: str | Path, namespace: str | None = None) -> dict[str, An
     if namespace is not None:
         root = root / namespace
     db_path = root / "memory.db"
-    journal_path = root / "journal.jsonl"
-    snap_path = root / "snapshot.pkl"
 
+    files = {f.name: f.stat().st_size for f in sorted(root.glob("*")) if f.is_file()}
     report: dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "path": str(root),
-        "files": {
-            f.name: f.stat().st_size
-            for f in (db_path, journal_path, snap_path)
-            if f.exists()
-        },
+        "files": files,
     }
-    report["total_size_mb"] = round(sum(report["files"].values()) / 1e6, 3)
+    report["total_size_mb"] = round(sum(files.values()) / 1e6, 3)
     if not db_path.exists():
         report["empty"] = True
         return report
 
     report.update(_db_stats(root))
     report["index"] = _index_stats(root)
-    report["snapshot"] = _snapshot_stats(snap_path)
-    report["journal"] = (
-        _journal_stats(journal_path)
-        if journal_path.exists()
-        else {"events_total": 0}
-    )
+    report["graph"] = _graph_stats(root)
+    report["journal"] = _event_stats(root)
     return report
 
 
@@ -229,14 +236,14 @@ def render(report: dict[str, Any]) -> str:
     add(f"  следов в индексе: {idx.get('traces_indexed')}; юнитов задействовано: {idx.get('units_touched')}")
     add(f"  средняя/макс нагрузка бакета: {idx.get('mean_bucket_load')} / {idx.get('max_bucket_load')}")
 
-    snap = report.get("snapshot", {})
-    if snap:
+    graph = report.get("graph", {})
+    if graph:
         add("")
         add("-- гейт новизны (все решения) ------------------------------------------")
-        for act, c in snap.get("gate_decisions_all_time", {}).items():
+        for act, c in graph.get("gate_decisions_all_time", {}).items():
             add(f"    {act:<12} {c}")
-        if "edges_committed_current" in snap:
-            add(f"    активных рёбер L2: {snap['edges_committed_current']}")
+        if "edges_committed_current" in graph:
+            add(f"    активных рёбер L2: {graph['edges_committed_current']}")
 
     add("")
     add("-- самые подкреплённые ------------------------------------------------")

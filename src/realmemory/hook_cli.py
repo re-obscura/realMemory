@@ -3,10 +3,13 @@
 python -m realmemory.hook_cli brief  --path ./rm_data [--top N] [--plain]
     Печатает JSON SessionStart-хука (additionalContext) с кратким состоянием
     памяти: объёмы, ключевые семантические факты. Модель эмбеддера НЕ грузится.
-python -m realmemory.hook_cli sleep --path ./rm_data [--min-interval-s S]
-    Консолидация («сон»): коммит связей, распад, метрики в журнал, снапшот.
-    Троттлинг: пропускает, если с прошлого сна ничего не менялось и не прошло
-    min-interval-s (по умолчанию 30 минут). Вывод пустой, код возврата 0.
+python -m realmemory.hook_cli sleep --path ./rm_data
+    Консолидация («сон»): коммит связей, распад, метрики в журнал. Троттлинг
+    по состоянию базы: пропускает, если с прошлого сна не было ни записей,
+    ни feedback, ни незакоммиченных bind'ов. Вывод пустой, код возврата 0.
+
+Обе команды безопасно сосуществуют с работающим MCP-сервером: всё состояние
+в SQLite, консолидации сериализуются BEGIN IMMEDIATE.
 """
 from __future__ import annotations
 
@@ -14,7 +17,6 @@ import argparse
 import json
 import sqlite3
 import sys
-import time
 from pathlib import Path
 
 
@@ -31,25 +33,35 @@ def _infer_dim(path: Path) -> int:
     return int(row[0]) // 4 if row else 256
 
 
+def _load_cfg(path: Path):
+    """Конфиг из базы (записывается при первом открытии); None если нет/битый."""
+    db = path / "memory.db"
+    if not db.exists():
+        return None
+    con = sqlite3.connect(str(db))
+    try:
+        row = con.execute("SELECT value FROM db_meta WHERE key='config'").fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        con.close()
+    if not row:
+        return None
+    from .config import MemoryConfig
+
+    try:
+        return MemoryConfig.from_snapshot(json.loads(row[0]))
+    except Exception:  # noqa: BLE001 - битый конфиг не должен ломать хук
+        return None
+
+
 def _open(path: str, namespace: str | None = None):
     from . import Hippocampus, MemoryConfig
     from .encoding.embedder import HashingEmbedder
     from .timeprov import SystemClock
 
     p = _resolve_hook_root(Path(path), namespace)
-    cfg = None
-    snap = p / "snapshot.pkl"
-    if snap.exists():
-        try:
-            with snap.open("rb") as f:
-                import pickle
-
-                payload = pickle.load(f)
-            cfg = MemoryConfig.from_snapshot(payload["config"])
-        except Exception:  # noqa: BLE001 - битый снапшот не должен ломать хук
-            cfg = None
-    if cfg is None:
-        cfg = MemoryConfig(dim=_infer_dim(p))
+    cfg = _load_cfg(p) or MemoryConfig(dim=_infer_dim(p))
     return Hippocampus.open(
         p, config=cfg, embedder=HashingEmbedder(dim=cfg.dim), clock=SystemClock(),
         verify_embedder=False,  # хук не порождает векторов; боевой эмбеддер базы не трогаем
@@ -100,18 +112,36 @@ def cmd_brief(args) -> int:
         hippo.close()
 
 
+def _sleep_needed(db: Path) -> bool:
+    """Сон нужен, если с прошлой консолидации что-то изменилось: записи/feedback
+    (updated_at), новые eligibility-события. Нет прошлого сна — нужен."""
+    if not db.exists():
+        return True
+    con = sqlite3.connect(str(db))
+    try:
+        row = con.execute(
+            "SELECT value FROM db_meta WHERE key='last_consolidate_at'"
+        ).fetchone()
+        maxu = con.execute("SELECT MAX(updated_at) FROM memories").fetchone()[0]
+        pend = con.execute("SELECT COUNT(*) FROM eligibility").fetchone()[0]
+    except sqlite3.DatabaseError:
+        return True
+    finally:
+        con.close()
+    if row is None:
+        return True
+    last = float(row[0])
+    newest = float(maxu) if maxu is not None else 0.0
+    return newest > last or pend > 0
+
+
 def cmd_sleep(args) -> int:
     root = _resolve_hook_root(Path(args.path), getattr(args, "namespace", None))
-    snap = root / "snapshot.pkl"
-    db = root / "memory.db"
-    # троттлинг: недавно спали и с тех пор ничего не писали
-    recently_slept = snap.exists() and (time.time() - snap.stat().st_mtime) < args.min_interval_s
-    nothing_new = snap.exists() and db.exists() and snap.stat().st_mtime >= db.stat().st_mtime
-    if recently_slept and nothing_new:
+    if not _sleep_needed(root / "memory.db"):
         return 0
     hippo = _open(args.path, getattr(args, "namespace", None))
     try:
-        report = hippo.consolidate(save=True)
+        report = hippo.consolidate()
         if args.verbose:
             print(json.dumps({**vars(report)}, ensure_ascii=False))
     finally:
@@ -130,10 +160,9 @@ def main(argv=None) -> None:
     b.add_argument("--plain", action="store_true", help="человекочитаемый текст вместо JSON")
     b.set_defaults(fn=cmd_brief)
 
-    s = sub.add_parser("sleep", help="Stop: консолидация с троттлингом")
+    s = sub.add_parser("sleep", help="Stop: консолидация с троттлингом по состоянию базы")
     s.add_argument("--path", required=True)
     s.add_argument("--namespace", default=None, help="подкаталог внутри --path")
-    s.add_argument("--min-interval-s", type=float, default=1800.0)
     s.add_argument("--verbose", action="store_true")
     s.set_defaults(fn=cmd_sleep)
 

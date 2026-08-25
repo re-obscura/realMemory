@@ -1,7 +1,6 @@
-"""Хуки hook_cli: SessionStart-брифинг и «сон» с троттлингом."""
+"""Хуки hook_cli: SessionStart-брифинг и «сон» с троттлингом по состоянию базы."""
 import json
-import os
-import time
+import sqlite3
 
 import pytest
 
@@ -23,6 +22,15 @@ def populated(tmp_path, tiny_cfg, clock):
     path = str(h.path)
     yield path, sem.memory_id
     h.close()
+
+
+def _meta(db: str, key: str) -> str | None:
+    con = sqlite3.connect(db)
+    try:
+        row = con.execute("SELECT value FROM db_meta WHERE key=?", (key,)).fetchone()
+    finally:
+        con.close()
+    return None if row is None else row[0]
 
 
 def test_brief_emits_valid_session_start_json(populated, capsys):
@@ -47,7 +55,7 @@ def test_brief_plain_lists_semantic(populated, capsys):
     assert "plimso pt9 suvat" in out
 
 
-def test_sleep_skips_when_recently_idle(populated, capsys):
+def test_sleep_skips_when_nothing_new(populated, capsys):
     path, _ = populated
     # только что консолидировали и ничего не писали -> тихий пропуск
     with pytest.raises(SystemExit) as e:
@@ -56,16 +64,27 @@ def test_sleep_skips_when_recently_idle(populated, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_sleep_runs_when_stale_or_dirty(populated, capsys):
+def test_sleep_runs_when_dirty(populated, capsys):
     path, _ = populated
-    snap = os.path.join(path, "snapshot.pkl")
-    old = time.time() - 4000  # старше min-interval -> сон обязан выполниться
-    os.utime(snap, (old, old))
+    db = f"{path}/memory.db"
+    # появилась новая запись после прошлого сна -> сон обязан выполниться
+    from realmemory import Hippocampus
+    from realmemory.config import MemoryConfig
+    from realmemory.encoding.embedder import HashingEmbedder
+
+    cfg = MemoryConfig.from_snapshot(json.loads(_meta(db, "config")))
+    h2 = Hippocampus.open(path, config=cfg,
+                          embedder=HashingEmbedder(dim=cfg.dim), verify_embedder=False)
+    try:
+        h2.remember("korvex kv8 fresh")
+    finally:
+        h2.close()
+    before = float(_meta(db, "last_consolidate_at"))
     with pytest.raises(SystemExit) as e:
         hook_main(["sleep", "--path", path])
     assert e.value.code == 0
     assert capsys.readouterr().out == ""
-    assert os.path.getmtime(snap) > old
+    assert float(_meta(db, "last_consolidate_at")) > before
 
 
 def test_sleep_on_missing_dir_is_safe(tmp_path):
