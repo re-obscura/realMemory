@@ -45,10 +45,12 @@ _SCHEMA_STATEMENTS = (
         base_strength REAL NOT NULL DEFAULT 1.0,
         valid_from REAL NOT NULL,
         valid_to REAL,
-        superseded_by INTEGER
+        superseded_by INTEGER,
+        scope TEXT NOT NULL DEFAULT 'global'
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
     """
     CREATE TABLE IF NOT EXISTS edges (
         key INTEGER PRIMARY KEY,
@@ -91,12 +93,12 @@ _SCHEMA_STATEMENTS = (
 _INSERT_SQL = (
     "INSERT INTO memories(text,kind,status,meta,embedding,sdr,"
     "created_at,updated_at,reinforced_count,last_reinforced_at,base_strength,"
-    "valid_from,valid_to,superseded_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "valid_from,valid_to,superseded_by,scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 _COLS = (
     "id,text,kind,status,meta,embedding,sdr,created_at,updated_at,"
-    "reinforced_count,last_reinforced_at,base_strength,valid_from,valid_to,superseded_by"
+    "reinforced_count,last_reinforced_at,base_strength,valid_from,valid_to,superseded_by,scope"
 )
 
 
@@ -114,7 +116,7 @@ def _pack_i32(v: np.ndarray) -> bytes:
 
 def _row_to_record(row: tuple, dim: int) -> MemoryRecord:
     (rid, text, kind, status, meta_json, emb_b, sdr_b, created, updated,
-     rcount, rlast, base, vfrom, vto, sby) = row
+     rcount, rlast, base, vfrom, vto, sby, scope) = row
     return MemoryRecord(
         id=int(rid),
         text=text,
@@ -131,6 +133,7 @@ def _row_to_record(row: tuple, dim: int) -> MemoryRecord:
         valid_from=float(vfrom),
         valid_to=None if vto is None else float(vto),
         superseded_by=None if sby is None else int(sby),
+        scope=str(scope),
     )
 
 
@@ -150,6 +153,13 @@ class MemoryStore:
             with self._txn() as con:
                 for stmt in _SCHEMA_STATEMENTS:
                     con.execute(stmt)
+                # миграция баз, созданных до появления scope
+                cols = {r[1] for r in con.execute("PRAGMA table_info(memories)")}
+                if "scope" not in cols:
+                    con.execute(
+                        "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL "
+                        "DEFAULT 'global'"
+                    )
         except sqlite3.DatabaseError as exc:
             raise StorageError(f"не удалось открыть {self.path}: {exc}") from exc
 
@@ -193,6 +203,7 @@ class MemoryStore:
                     float(rec.valid_from),
                     None if rec.valid_to is None else float(rec.valid_to),
                     rec.superseded_by,
+                    str(rec.scope or "global"),
                 ),
             )
             rowid = cur.lastrowid
@@ -315,7 +326,8 @@ class MemoryStore:
             ).fetchall()
         return np.asarray([r[0] for r in rows], dtype=np.int64)
 
-    def count(self, status: str | None = None, kind: str | None = None) -> int:
+    def count(self, status: str | None = None, kind: str | None = None,
+              scope: str | None = None) -> int:
         query = "SELECT COUNT(*) FROM memories"
         conds, params = [], []
         if status is not None:
@@ -324,11 +336,22 @@ class MemoryStore:
         if kind is not None:
             conds.append("kind=?")
             params.append(kind)
+        if scope is not None:
+            conds.append("scope=?")
+            params.append(scope)
         if conds:
             query += " WHERE " + " AND ".join(conds)
         with self._lock:
             (n,) = self._conn.execute(query, params).fetchone()
         return int(n)
+
+    def scope_counts(self) -> dict[str, int]:
+        """Активные следы по скоупам (для introspect/отчёта)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT scope, COUNT(*) FROM memories WHERE status='active' GROUP BY scope"
+            ).fetchall()
+        return {str(s): int(n) for s, n in rows}
 
     def top_by_reinforcements(self, limit: int = 10) -> list[MemoryRecord]:
         """Самые подкреплённые активные следы (для отчёта)."""

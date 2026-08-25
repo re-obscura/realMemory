@@ -27,6 +27,7 @@ def _packet_to_dict(packet) -> dict[str, Any]:
                 "confidence": it.confidence,
                 "retention": it.retention,
                 "source": it.source,
+                "scope": it.scope,
                 "created_at": it.created_at,
                 "meta": dict(it.meta),
             }
@@ -35,8 +36,11 @@ def _packet_to_dict(packet) -> dict[str, Any]:
     }
 
 
-def build_server(hippo):
-    """Собрать FastMCP-сервер над фасадом. Требует пакет fastmcp (extra [mcp])."""
+def build_server(hippo, default_project: str | None = None):
+    """Собрать FastMCP-сервер над фасадом. Требует пакет fastmcp (extra [mcp]).
+
+    default_project — скоуп по умолчанию (обычно определён по рабочей директории);
+    явный аргумент project тула имеет приоритет."""
     try:
         from fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - зависит от окружения
@@ -46,39 +50,56 @@ def build_server(hippo):
 
     mcp = FastMCP("realmemory")
 
+    def _effective(project: str | None) -> str | None:
+        return project or default_project
+
     @mcp.tool()
-    def recall(query: str, k: int = 5, include_superseded: bool = False) -> str:
+    def recall(query: str, k: int = 5, include_superseded: bool = False,
+               project: str | None = None) -> str:
         """Recollect long-term memories relevant to the query.
 
         Use before making claims about the user, their projects or previous
         sessions. Returns JSON: items [{id, text, kind, cosine, confidence,
-        retention, source, created_at, meta}] ranked by confidence, plus an
-        abstained flag. abstained=true means nothing trustworthy was remembered —
-        say so honestly instead of guessing. Items with source=associated arrived
-        via associative links and may be less precise; present confidence < 0.2
-        as "possibly", not as fact.
+        retention, source, scope, created_at, meta}] ranked by confidence, plus
+        an abstained flag. abstained=true means nothing trustworthy was
+        remembered — say so honestly instead of guessing. Items with
+        source=associated arrived via associative links and may be less precise;
+        present confidence < 0.2 as "possibly", not as fact.
+
+        Scope: searches the current project plus global memory; pass an explicit
+        project name to search another project instead.
         """
-        packet = hippo.recall(query, k=k, include_superseded=include_superseded)
+        packet = hippo.recall(query, k=k, include_superseded=include_superseded,
+                              scope=_effective(project))
         return json.dumps(_packet_to_dict(packet), ensure_ascii=False)
 
     @mcp.tool()
-    def memorize(text: str, kind: str = "episodic", related_ids: list[int] | None = None) -> str:
+    def memorize(text: str, kind: str = "episodic", related_ids: list[int] | None = None,
+                 project: str | None = None) -> str:
         """Commit one durable fact, decision or preference to long-term memory.
 
         Write conclusions rather than conversation snippets ("we chose SQLite WAL",
         "user prefers concise answers"). The novelty gate decides automatically:
         an already-known fact gets reinforced, a related one links to it, a fresh
         one allocates a new trace — reformulations don't pile up. Pass related_ids
-        when this builds on specific earlier memories. Returns {memory_id, action,
-        created}. kind: episodic (default) or semantic.
+        when this builds on specific earlier memories.
+
+        Scope rules: facts about THIS workspace (decisions, gotchas, stack
+        choices) — pass project=<workspace name> (default is detected
+        automatically); user-global preferences and identity ("отвечай кратко",
+        preferred languages) — omit project. Returns {memory_id, action, created}.
         """
-        res = hippo.remember(text, kind=kind, related_ids=tuple(related_ids or ()))
+        scope = _effective(project) or "global"
+        res = hippo.remember(
+            text, kind=kind, related_ids=tuple(related_ids or ()), scope=scope,
+        )
         return json.dumps(
             {
                 "memory_id": res.memory_id,
                 "created": res.created,
                 "action": res.decision.action.value,
                 "novelty": round(res.decision.novelty, 4),
+                "scope": scope,
             },
             ensure_ascii=False,
         )
@@ -101,7 +122,8 @@ def build_server(hippo):
         """Correct a memory whose reality has changed ("we now use X instead of Y").
 
         The outdated trace is kept as linked history and excluded from future
-        recalls; nothing is silently lost. Returns {old_id, new_id}.
+        recalls; nothing is silently lost. The replacement inherits the old
+        trace's project scope. Returns {old_id, new_id}.
         """
         res = hippo.update_fact(int(old_id), new_text)
         return json.dumps({"old_id": int(old_id), "new_id": res.memory_id},
@@ -109,9 +131,11 @@ def build_server(hippo):
 
     @mcp.tool()
     def introspect() -> str:
-        """Quick look inward: trace counts by kind/status, association counts,
-        gate decision tallies, activity statistics."""
-        return json.dumps(hippo.stats(), ensure_ascii=False)
+        """Quick look inward: current project, trace counts by kind/status/scope,
+        association counts, gate decision tallies, activity statistics."""
+        stats = {"project": default_project, **hippo.stats(),
+                 "scopes": hippo.store.scope_counts()}
+        return json.dumps(stats, ensure_ascii=False)
 
     @mcp.tool()
     def dream_log() -> str:
@@ -159,6 +183,12 @@ def main(argv=None) -> None:
         help="подкаталог внутри --path: изоляция проектов/контекстов",
     )
     parser.add_argument(
+        "--project",
+        default=None,
+        help="скоуп проекта по умолчанию; по умолчанию определяется автоматически "
+             "(REALMEMORY_PROJECT / ZCODE_PROJECT_DIR / рабочая директория с .git)",
+    )
+    parser.add_argument(
         "--embedder",
         choices=["auto", "local", "hashing"],
         default="local",
@@ -167,12 +197,16 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
     from ..config import MemoryConfig
     from ..hippocampus import Hippocampus
+    from ..projects import resolve_project
 
     embedder = make_embedder(args.embedder)
     cfg = MemoryConfig(dim=embedder.dim)
     hippo = Hippocampus.open(args.path, config=cfg, embedder=embedder,
                              namespace=args.namespace)
-    build_server(hippo).run()
+    default_project = resolve_project(args.project)
+    if default_project:
+        print(f"[realmemory] project scope: {default_project}", flush=True)
+    build_server(hippo, default_project=default_project).run()
 
 
 if __name__ == "__main__":  # pragma: no cover

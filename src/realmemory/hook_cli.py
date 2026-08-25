@@ -74,26 +74,36 @@ def _resolve_hook_root(root: Path, namespace: str | None) -> Path:
 
 
 def cmd_brief(args) -> int:
+    from .policies.decay import retention
+    from .projects import resolve_project
+
     hippo = _open(args.path, getattr(args, "namespace", None))
     try:
         now = float(hippo.clock.now())
-        from .policies.decay import retention
+        project = resolve_project(getattr(args, "project", None))
+
+        def in_scope(rec_scope: str) -> bool:
+            return project is None or rec_scope == project or rec_scope == "global"
 
         semantic = []
         for rec in hippo.store.iter_active():
-            if rec.kind != "semantic":
+            if rec.kind != "semantic" or not in_scope(rec.scope):
                 continue
             ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, hippo.config)
             semantic.append((ret, rec.reinforced_count, rec.text))
         semantic.sort(key=lambda t: (-t[0], -t[1]))
+        header = (
+            f"[realMemory] persistent memory online: "
+            f"{hippo.store.count(status='active')} traces ({len(semantic)} semantic), "
+            f"{hippo.network.edge_count} associations"
+        )
+        if project:
+            header += f"; project scope: {project}"
         lines = [
-            (
-                f"[realMemory] persistent memory online: "
-                f"{hippo.store.count(status='active')} traces ({len(semantic)} semantic), "
-                f"{hippo.network.edge_count} associations. Retrieve context with "
-                "`recall` before asserting facts; record decisions and preferences "
-                "with `memorize`; grade usefulness with `reflect`."
-            )
+            header +
+            ". Retrieve context with `recall` before asserting facts; record "
+            "decisions and preferences with `memorize`; grade usefulness with "
+            "`reflect`."
         ]
         for _, _, text in semantic[: args.top]:
             lines.append(f"• {text}")
@@ -156,6 +166,8 @@ def main(argv=None) -> None:
     b = sub.add_parser("brief", help="SessionStart: JSON additionalContext")
     b.add_argument("--path", required=True)
     b.add_argument("--namespace", default=None, help="подкаталог внутри --path")
+    b.add_argument("--project", default=None,
+                   help="скоуп проекта; по умолчанию определяется автоматически")
     b.add_argument("--top", type=int, default=7)
     b.add_argument("--plain", action="store_true", help="человекочитаемый текст вместо JSON")
     b.set_defaults(fn=cmd_brief)

@@ -11,6 +11,7 @@ KIND_EPISODIC = "episodic"
 KIND_SEMANTIC = "semantic"
 STATUS_ACTIVE = "active"
 STATUS_SUPERSEDED = "superseded"
+SCOPE_GLOBAL = "global"
 
 SOURCE_DIRECT = "direct"
 SOURCE_ASSOCIATED = "associated"
@@ -52,6 +53,7 @@ class RecalledMemory:
     created_at: float
     updated_at: float
     meta: dict[str, Any]
+    scope: str = SCOPE_GLOBAL
 
 
 @dataclass(frozen=True)
@@ -90,3 +92,4 @@ class MemoryRecord:
     valid_from: float
     valid_to: float | None = None
     superseded_by: int | None = None
+    scope: str = SCOPE_GLOBAL  # 'global' или имя проекта; recall видит свой проект + global

@@ -36,6 +36,7 @@ from .timeprov import SystemClock, TimeProvider
 from .types import (
     KIND_EPISODIC,
     KIND_SEMANTIC,
+    SCOPE_GLOBAL,
     SOURCE_ASSOCIATED,
     SOURCE_DIRECT,
     STATUS_ACTIVE,
@@ -286,14 +287,19 @@ class Hippocampus:
             return 0.0
         return float(np.dot(a, b) / (na * nb))
 
-    def _probe(self, emb: np.ndarray, sdr: np.ndarray) -> tuple[int | None, float, tuple[int, ...]]:
-        """Лучший существующий след по косинусу среди кандидатов L1."""
+    def _probe(self, emb: np.ndarray, sdr: np.ndarray,
+               scope: str | None = None) -> tuple[int | None, float, tuple[int, ...]]:
+        """Лучший существующий след по косинусу среди кандидатов L1.
+        Гейт сравнивает текст только со своим проектом и global — факты разных
+        проектов не сливаются в REINFORCE/LINK."""
         qr = self.index.query(sdr, max_candidates=max(2, self.config.recall_oversample * 3))
         if qr.candidates.size == 0:
             return None, 0.0, ()
         scored: list[tuple[int, float]] = []
         for rec in self.store.get_many(qr.candidates.tolist()):
             if rec.status != STATUS_ACTIVE:
+                continue
+            if not self._scope_allows(rec.scope, scope, all_scopes=False):
                 continue
             scored.append((int(rec.id), max(0.0, self._cosine(emb, rec.embedding))))
         if not scored:
@@ -303,7 +309,15 @@ class Hippocampus:
         near = tuple(i for i, c in scored[1:] if c >= self.config.theta_link)[:4]
         return best_id, best_cos, near
 
-    def _insert_memory(self, text, kind, meta, now, emb, sdr) -> int:
+    @staticmethod
+    def _scope_allows(rec_scope: str, scope: str | None, all_scopes: bool) -> bool:
+        """scope=None или all_scopes — без фильтра; иначе свой проект + global."""
+        if all_scopes or scope is None:
+            return True
+        return rec_scope == scope or rec_scope == SCOPE_GLOBAL
+
+    def _insert_memory(self, text, kind, meta, now, emb, sdr,
+                       scope: str = SCOPE_GLOBAL) -> int:
         rec = MemoryRecord(
             id=None,
             text=text,
@@ -318,6 +332,7 @@ class Hippocampus:
             last_reinforced_at=now,
             base_strength=float(self.config.initial_strength),
             valid_from=now,
+            scope=scope,
         )
         mid = self.store.insert(rec)
         self.index.write(sdr, mid)
@@ -374,11 +389,16 @@ class Hippocampus:
         when: float | None = None,
         force_new: bool = False,
         related_ids: Sequence[int] = (),
+        scope: str = SCOPE_GLOBAL,
     ) -> WriteResult:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text должен быть непустой строкой")
         if kind not in (KIND_EPISODIC, KIND_SEMANTIC):
             raise ValueError(f"kind должен быть '{KIND_EPISODIC}' или '{KIND_SEMANTIC}'")
+        if not isinstance(scope, str) or not _NAMESPACE_RE.fullmatch(scope):
+            raise ValueError(
+                "scope: 1–64 символа из [A-Za-z0-9_.-], первый — буква или цифра"
+            )
         related_ids = tuple(dict.fromkeys(int(i) for i in related_ids))
         known: dict[int, MemoryRecord] = {}
         for rid in related_ids:
@@ -388,7 +408,7 @@ class Hippocampus:
             known[rid] = rec
         now = float(when) if when is not None else float(self.clock.now())
         emb, sdr = self._encode(text)
-        best_id, best_cos, near_ids = self._probe(emb, sdr)
+        best_id, best_cos, near_ids = self._probe(emb, sdr, scope=scope)
 
         action = DecisionAction.CREATE if force_new else gate(best_cos, self.config)
         target = best_id if action is DecisionAction.REINFORCE else None
@@ -409,20 +429,20 @@ class Hippocampus:
             mid = best_id
             created = False
         elif action is DecisionAction.LINK:
-            mid = self._insert_memory(text, kind, meta, now, emb, sdr)
+            mid = self._insert_memory(text, kind, meta, now, emb, sdr, scope=scope)
             for rid in all_related:
                 other = known.get(rid)
                 other_sdr = other.sdr if other is not None else self._sdr_of(rid)
                 self._bind_sdrs(sdr, other_sdr, strength=1.0, now=now, source_ids=(mid, rid))
             created = True
         else:
-            mid = self._insert_memory(text, kind, meta, now, emb, sdr)
+            mid = self._insert_memory(text, kind, meta, now, emb, sdr, scope=scope)
             for rid in all_related:
                 self._bind_sdrs(sdr, self._sdr_of(rid), strength=0.5, now=now, source_ids=(mid, rid))
             created = True
 
         self.journal.append("write", id=mid, kind=kind, action=action.value,
-                            created=created, chars=len(text), t=now)
+                            created=created, chars=len(text), scope=scope, t=now)
         return WriteResult(memory_id=mid, decision=decision, created=created)
 
     def _sdr_of(self, memory_id: int) -> np.ndarray:
@@ -458,7 +478,8 @@ class Hippocampus:
         if old is None:
             raise KeyError(f"след {old_id} не существует")
         merged_meta = {**old.meta, **(meta or {}), "supersedes": int(old_id)}
-        res = self.remember(new_text, kind=old.kind, meta=merged_meta, force_new=True)
+        res = self.remember(new_text, kind=old.kind, meta=merged_meta, force_new=True,
+                            scope=old.scope)
         now = float(self.clock.now())
         self.store.mark_superseded(old_id, res.memory_id, now)
         self._bind_sdrs(old.sdr, self._sdr_of(res.memory_id),
@@ -468,7 +489,17 @@ class Hippocampus:
 
     # -- чтение ---------------------------------------------------------------------
 
-    def recall(self, query: str, *, k: int = 5, include_superseded: bool = False) -> RecallPacket:
+    def recall(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        include_superseded: bool = False,
+        scope: str | None = None,
+        all_scopes: bool = False,
+    ) -> RecallPacket:
+        """Поиск по памяти. scope='<проект>' видит следы проекта и global;
+        scope=None или all_scopes=True — вся память без фильтра."""
         t0 = _time.perf_counter()
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query должен быть непустой строкой")
@@ -491,6 +522,8 @@ class Hippocampus:
 
         for rec in self.store.get_many(list(votes_map.keys())):
             if rec.status != STATUS_ACTIVE and not include_superseded:
+                continue
+            if not self._scope_allows(rec.scope, scope, all_scopes):
                 continue
             cos = max(0.0, self._cosine(emb, rec.embedding))
             if cos < self.config.cos_min_recall:
@@ -527,6 +560,8 @@ class Hippocampus:
             for rec in self.store.get_many(assoc_ids):
                 if rec.status != STATUS_ACTIVE and not include_superseded:
                     continue
+                if not self._scope_allows(rec.scope, scope, all_scopes):
+                    continue
                 cos = max(0.0, self._cosine(emb, rec.embedding))
                 ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, self.config)
                 if ret < self.config.min_retention_recall:
@@ -549,6 +584,7 @@ class Hippocampus:
                 created_at=rec.created_at,
                 updated_at=rec.updated_at,
                 meta=dict(rec.meta),
+                scope=rec.scope,
             )
             for c, cos, ret, rec, source in items
         )
