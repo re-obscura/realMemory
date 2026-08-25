@@ -16,6 +16,7 @@ BEGIN IMMEDIATE на мутациях исключают потерю состо
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
@@ -106,6 +107,59 @@ class StorageError(Exception):
     """Повреждение или недоступность хранилища."""
 
 
+# Гибридный поиск: внешне-содержимый FTS5 поверх текстов следа.
+# Создаётся отдельно от основной схемы: сборка SQLite без FTS5
+# не должна ломать открытие базы — ядро просто теряет keyword-канал.
+_FTS_STATEMENTS = (
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        text,
+        content='memories',
+        content_rowid='id',
+        tokenize='unicode61 remove_diacritics 2'
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE OF text ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+        INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+    END
+    """,
+)
+
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def tokenize(text: str) -> list[str]:
+    """Токены для keyword-канала: слова в нижнем регистре (unicode)."""
+    return [t.lower() for t in _TOKEN_RE.findall(text)]
+
+
+def build_fts_query(text: str, max_terms: int = 12) -> str | None:
+    """Выражение MATCH из токенов запроса: "tok1" OR "tok2" ..."""
+    seen: dict[str, None] = {}
+    for t in tokenize(text):
+        if len(t) > 1:
+            seen.setdefault(t)
+        if len(seen) >= max_terms:
+            break
+    if not seen:
+        return None
+    return " OR ".join(f'"{t}"' for t in seen)
+
+
 def _pack_f32(v: np.ndarray) -> bytes:
     return np.asarray(v, dtype=np.float32).tobytes()
 
@@ -160,6 +214,16 @@ class MemoryStore:
                         "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL "
                         "DEFAULT 'global'"
                     )
+            self._fts_error: str | None = None
+            try:
+                with self._txn() as con:
+                    for stmt in _FTS_STATEMENTS:
+                        con.execute(stmt)
+                self._fts_enabled = True
+            except sqlite3.OperationalError as exc:
+                # редкая сборка SQLite без FTS5: ядро работает, keyword-канала нет
+                self._fts_enabled = False
+                self._fts_error = str(exc)
         except sqlite3.DatabaseError as exc:
             raise StorageError(f"не удалось открыть {self.path}: {exc}") from exc
 
@@ -372,6 +436,28 @@ class MemoryStore:
                 (int(limit),),
             ).fetchall()
         return [_row_to_record(r, self.dim) for r in rows]
+
+    # -- keyword-канал (FTS5) ------------------------------------------------------
+
+    @property
+    def fts_enabled(self) -> bool:
+        return getattr(self, "_fts_enabled", False)
+
+    @property
+    def fts_error(self) -> str | None:
+        return getattr(self, "_fts_error", None)
+
+    def fts_match(self, expr: str, limit: int = 32) -> list[tuple[int, float]]:
+        """ID следа + bm25-ранг (меньше = лучше) по выражению MATCH."""
+        if not self.fts_enabled or not expr:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT rowid, bm25(memories_fts) FROM memories_fts "
+                "WHERE memories_fts MATCH ? ORDER BY 2 LIMIT ?",
+                (expr, int(limit)),
+            ).fetchall()
+        return [(int(r), float(b)) for r, b in rows]
 
     # -- рёбра L2 ---------------------------------------------------------------------
 

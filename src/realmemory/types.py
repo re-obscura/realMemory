@@ -15,6 +15,7 @@ SCOPE_GLOBAL = "global"
 
 SOURCE_DIRECT = "direct"
 SOURCE_ASSOCIATED = "associated"
+SOURCE_KEYWORD = "keyword"
 
 
 class DecisionAction(str, Enum):

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 
@@ -33,6 +34,13 @@ class FastEmbedProvider:
     Потокобезопасность: ONNX-сессия не гарантирует многопоточность — прикрываем
     замком; нагрузка одиночного агента это полностью покрывает.
     """
+
+    # Пороги гейта/отбора под анизотропию MiniLM paraphrase-multilingual
+    # (замеры 2026-08: несвязные пары cos <= 0.26, переформулировки >= 0.59).
+    recommended_thresholds: ClassVar[dict[str, float]] = {
+        "theta_link": 0.30,
+        "cos_min_recall": 0.15,
+    }
 
     def __init__(
         self,

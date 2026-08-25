@@ -48,6 +48,7 @@ class MemoryConfig:
     # -- ранжирование recall ---------------------------------------------------
     w_votes: float = 0.5
     assoc_confidence_penalty: float = 0.8
+    w_keyword: float = 0.65  # вес keyword-канала FTS5 (точные токены при низком косинусе)
 
     def validate(self) -> None:
         if self.dim <= 0 or self.n_units <= 0:
@@ -68,6 +69,8 @@ class MemoryConfig:
             raise ValueError("требуется 0 < initial_strength <= strength_cap <= 1")
         if not 0.0 < self.assoc_confidence_penalty <= 1.0:
             raise ValueError("assoc_confidence_penalty должен быть в (0, 1]")
+        if not 0.0 < self.w_keyword <= 1.0:
+            raise ValueError("w_keyword должен быть в (0, 1]")
         if self.recall_oversample < 1 or self.max_pairs_per_bind < 1:
             raise ValueError("recall_oversample и max_pairs_per_bind должны быть >= 1")
 

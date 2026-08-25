@@ -31,7 +31,7 @@ from .encoding.embedder import EmbeddingProvider, HashingEmbedder
 from .encoding.sdr import SDREncoder
 from .policies.decay import reinforce_values, retention, should_promote, weaken_value
 from .policies.novelty import gate
-from .store.sqlite_store import MemoryStore
+from .store.sqlite_store import MemoryStore, build_fts_query, tokenize
 from .timeprov import SystemClock, TimeProvider
 from .types import (
     KIND_EPISODIC,
@@ -39,6 +39,7 @@ from .types import (
     SCOPE_GLOBAL,
     SOURCE_ASSOCIATED,
     SOURCE_DIRECT,
+    SOURCE_KEYWORD,
     STATUS_ACTIVE,
     ConsolidationReport,
     DecisionAction,
@@ -287,16 +288,33 @@ class Hippocampus:
             return 0.0
         return float(np.dot(a, b) / (na * nb))
 
+    def _fts_candidates(self, text: str, limit: int) -> list[int]:
+        """ID следа с точным совпадением токенов (keyword-канал FTS5)."""
+        if not self.store.fts_enabled:
+            return []
+        expr = build_fts_query(text)
+        if expr is None:
+            return []
+        return [rid for rid, _ in self.store.fts_match(expr, limit=limit)]
+
     def _probe(self, emb: np.ndarray, sdr: np.ndarray,
-               scope: str | None = None) -> tuple[int | None, float, tuple[int, ...]]:
-        """Лучший существующий след по косинусу среди кандидатов L1.
+               scope: str | None = None,
+               text: str | None = None) -> tuple[int | None, float, tuple[int, ...]]:
+        """Лучший существующий след по косинусу среди кандидатов L1 + FTS.
         Гейт сравнивает текст только со своим проектом и global — факты разных
-        проектов не сливаются в REINFORCE/LINK."""
+        проектов не сливаются в REINFORCE/LINK; keyword-кандидаты ловят
+        почти-дубликаты с точными токенами (ID, коды ошибок)."""
         qr = self.index.query(sdr, max_candidates=max(2, self.config.recall_oversample * 3))
-        if qr.candidates.size == 0:
+        candidate_ids = list(qr.candidates.tolist())
+        for rid in self._fts_candidates(
+            text or "", limit=max(4, self.config.recall_oversample * 3)
+        ):
+            if rid not in candidate_ids:
+                candidate_ids.append(rid)
+        if not candidate_ids:
             return None, 0.0, ()
         scored: list[tuple[int, float]] = []
-        for rec in self.store.get_many(qr.candidates.tolist()):
+        for rec in self.store.get_many(candidate_ids):
             if rec.status != STATUS_ACTIVE:
                 continue
             if not self._scope_allows(rec.scope, scope, all_scopes=False):
@@ -408,7 +426,7 @@ class Hippocampus:
             known[rid] = rec
         now = float(when) if when is not None else float(self.clock.now())
         emb, sdr = self._encode(text)
-        best_id, best_cos, near_ids = self._probe(emb, sdr, scope=scope)
+        best_id, best_cos, near_ids = self._probe(emb, sdr, scope=scope, text=text)
 
         action = DecisionAction.CREATE if force_new else gate(best_cos, self.config)
         target = best_id if action is DecisionAction.REINFORCE else None
@@ -512,6 +530,10 @@ class Hippocampus:
         votes_map = {
             int(p): int(v) for p, v in zip(qr.candidates.tolist(), qr.votes.tolist())
         }
+        # keyword-канал: точные токены, которые семантика/хэши могут недотянуть
+        kw_ids = set(self._fts_candidates(query, limit=k * self.config.recall_oversample))
+        candidate_ids = list(votes_map.keys()) + sorted(kw_ids - set(votes_map.keys()))
+        query_tokens = set(tokenize(query)) or None
         items: list[tuple[float, float, float, MemoryRecord, str]] = []
         seen: set[int] = set()
 
@@ -520,20 +542,31 @@ class Hippocampus:
                 0.3 + 0.7 * ret
             )
 
-        for rec in self.store.get_many(list(votes_map.keys())):
+        for rec in self.store.get_many(candidate_ids):
             if rec.status != STATUS_ACTIVE and not include_superseded:
                 continue
             if not self._scope_allows(rec.scope, scope, all_scopes):
                 continue
             cos = max(0.0, self._cosine(emb, rec.embedding))
-            if cos < self.config.cos_min_recall:
-                continue
             ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, self.config)
             if ret < self.config.min_retention_recall:
                 continue
-            vnorm = votes_map.get(int(rec.id), 0) / max(1, qr.active_locations)
-            c = conf_direct(cos, vnorm, ret)
-            items.append((c, cos, ret, rec, SOURCE_DIRECT))
+            if cos >= self.config.cos_min_recall:
+                vnorm = votes_map.get(int(rec.id), 0) / max(1, qr.active_locations)
+                c = conf_direct(cos, vnorm, ret)
+                source = SOURCE_DIRECT
+            elif int(rec.id) in kw_ids and query_tokens:
+                # точное совпадение токенов при низком косинусе; уверенность
+                # пропорциональна доле запросных токенов в следе
+                doc_tokens = set(tokenize(rec.text))
+                overlap = len(doc_tokens & query_tokens) / len(query_tokens)
+                if overlap <= 0.0:
+                    continue
+                c = self.config.w_keyword * overlap * (0.3 + 0.7 * ret)
+                source = SOURCE_KEYWORD
+            else:
+                continue
+            items.append((c, cos, ret, rec, source))
             seen.add(int(rec.id))
         items.sort(key=lambda t: (-t[0], t[3].id))
         items = items[:k]

@@ -201,6 +201,13 @@ def main(argv=None) -> None:
 
     embedder = make_embedder(args.embedder)
     cfg = MemoryConfig(dim=embedder.dim)
+    profile = getattr(embedder, "recommended_thresholds", None)
+    if profile:
+        # пороги калиброваны под конкретный эмбеддер (анизотропия моделей);
+        # попадут в db_meta.config при первом открытии базы
+        for key, val in profile.items():
+            setattr(cfg, key, float(val))
+        cfg.validate()
     hippo = Hippocampus.open(args.path, config=cfg, embedder=embedder,
                              namespace=args.namespace)
     default_project = resolve_project(args.project)
