@@ -73,7 +73,12 @@ def _resolve_hook_root(root: Path, namespace: str | None) -> Path:
     return root / namespace if namespace else root
 
 
+_BRIEF_BUDGET_CHARS = 600  # бюджет фактов в additionalContext, кроме шапки
+
+
 def cmd_brief(args) -> int:
+    import math
+
     from .policies.decay import retention
     from .projects import resolve_project
 
@@ -85,13 +90,22 @@ def cmd_brief(args) -> int:
         def in_scope(rec_scope: str) -> bool:
             return project is None or rec_scope == project or rec_scope == "global"
 
-        semantic = []
+        semantic: list[tuple[float, int, str]] = []
+        episodic: list[tuple[float, float, str]] = []
         for rec in hippo.store.iter_active():
-            if rec.kind != "semantic" or not in_scope(rec.scope):
+            if not in_scope(rec.scope):
                 continue
             ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, hippo.config)
-            semantic.append((ret, rec.reinforced_count, rec.text))
+            if rec.kind == "semantic":
+                semantic.append((ret, rec.reinforced_count, rec.text))
+            elif rec.kind == "episodic":
+                # прочность = живучесть × подкрепления: устойчивые решения
+                # проекта показываем раньше одноразовых заметок
+                score = ret * (1.0 + math.log1p(rec.reinforced_count))
+                episodic.append((score, ret, rec.text))
         semantic.sort(key=lambda t: (-t[0], -t[1]))
+        episodic.sort(key=lambda t: (-t[0], -t[1]))
+
         header = (
             f"[realMemory] persistent memory online: "
             f"{hippo.store.count(status='active')} traces ({len(semantic)} semantic), "
@@ -105,8 +119,28 @@ def cmd_brief(args) -> int:
             "decisions and preferences with `memorize`; grade usefulness with "
             "`reflect`."
         ]
+        used = 0
+        shown: set[str] = set()
         for _, _, text in semantic[: args.top]:
-            lines.append(f"• {text}")
+            line = f"• {text}"
+            if used + len(line) > _BRIEF_BUDGET_CHARS:
+                break
+            lines.append(line)
+            shown.add(text)
+            used += len(line)
+        added_epi = 0
+        for _, _, text in episodic:
+            if added_epi >= args.episodic_top or used >= _BRIEF_BUDGET_CHARS:
+                break
+            if text in shown:
+                continue
+            line = f"· {text}"
+            if used + len(line) > _BRIEF_BUDGET_CHARS:
+                break
+            lines.append(line)
+            shown.add(text)
+            used += len(line)
+            added_epi += 1
         ctx = "\n".join(lines)
         if args.plain:
             print(ctx)
@@ -168,7 +202,9 @@ def main(argv=None) -> None:
     b.add_argument("--namespace", default=None, help="подкаталог внутри --path")
     b.add_argument("--project", default=None,
                    help="скоуп проекта; по умолчанию определяется автоматически")
-    b.add_argument("--top", type=int, default=7)
+    b.add_argument("--top", type=int, default=7, help="максимум семантических фактов")
+    b.add_argument("--episodic-top", type=int, default=5,
+                   help="максимум прочных эпизодических фактов после семантики")
     b.add_argument("--plain", action="store_true", help="человекочитаемый текст вместо JSON")
     b.set_defaults(fn=cmd_brief)
 

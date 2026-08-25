@@ -55,6 +55,37 @@ def test_brief_plain_lists_semantic(populated, capsys):
     assert "plimso pt9 suvat" in out
 
 
+def test_brief_includes_strong_episodic(populated, capsys):
+    """Эпизоды с подкреплениями попадают в бриф даже без повышения до semantic."""
+    path, _ = populated
+    with pytest.raises(SystemExit) as e:
+        hook_main(["brief", "--path", path, "--plain"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "korvex kv0" in out  # прочные эпизоды показаны вместе с семантикой
+
+
+def test_brief_respects_project_scope(tmp_path, tiny_cfg, clock, capsys):
+    from realmemory import Hippocampus
+
+    h = Hippocampus.open(tmp_path / "rm", config=tiny_cfg, clock=clock)
+    try:
+        h.remember("alphaproj alpha fact one", scope="alpha")
+        h.remember("betaproj beta fact two", scope="beta")
+        h.remember("globaluser prefers russian", scope="global")
+        h.consolidate()
+        path = str(h.path)
+    finally:
+        h.close()
+    with pytest.raises(SystemExit) as e:
+        hook_main(["brief", "--path", path, "--plain", "--project", "alpha",
+                   "--episodic-top", "10"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out
+    assert "betaproj" not in out
+
+
 def test_sleep_skips_when_nothing_new(populated, capsys):
     path, _ = populated
     # только что консолидировали и ничего не писали -> тихий пропуск

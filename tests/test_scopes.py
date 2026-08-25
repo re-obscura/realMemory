@@ -60,6 +60,42 @@ def test_scope_counts(hippo):
     assert counts.get(SCOPE_GLOBAL, 0) == 0
 
 
+def test_legacy_db_without_scope_column_migrates(tmp_path):
+    """Регресс: база до WP2 (без колонки scope) должна открываться,
+    индекс по scope создаётся строго после ALTER."""
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "CREATE TABLE memories ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, kind TEXT NOT NULL,"
+        " status TEXT NOT NULL, meta TEXT NOT NULL, embedding BLOB NOT NULL,"
+        " sdr BLOB NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,"
+        " reinforced_count INTEGER NOT NULL DEFAULT 0, last_reinforced_at REAL NOT NULL,"
+        " base_strength REAL NOT NULL DEFAULT 1.0, valid_from REAL NOT NULL,"
+        " valid_to REAL, superseded_by INTEGER)"
+    )
+    con.execute(
+        "INSERT INTO memories(text,kind,status,meta,embedding,sdr,created_at,updated_at,"
+        "reinforced_count,last_reinforced_at,base_strength,valid_from) "
+        "VALUES ('old fact','episodic','active','{}',"
+        "x'0000000000000000000000000000000000000000000000000000000000000000',"
+        "x'00000000',1.0,1.0,0,1.0,0.5,1.0)"
+    )
+    con.commit()
+    con.close()
+
+    from realmemory.store.sqlite_store import MemoryStore
+
+    store = MemoryStore(db, dim=8)
+    try:
+        assert store.get(1).scope == "global"
+        assert store.count(scope="global") == 1
+    finally:
+        store.close()
+
+
 # -- resolve_project ---------------------------------------------------------------
 
 def test_resolve_explicit_wins(monkeypatch):

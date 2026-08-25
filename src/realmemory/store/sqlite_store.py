@@ -51,7 +51,6 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
-    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
     """
     CREATE TABLE IF NOT EXISTS edges (
         key INTEGER PRIMARY KEY,
@@ -207,13 +206,17 @@ class MemoryStore:
             with self._txn() as con:
                 for stmt in _SCHEMA_STATEMENTS:
                     con.execute(stmt)
-                # миграция баз, созданных до появления scope
+                # миграция баз, созданных до появления scope; индекс строго
+                # после гарантии колонки — иначе на legacy-базе нет такого столбца
                 cols = {r[1] for r in con.execute("PRAGMA table_info(memories)")}
                 if "scope" not in cols:
                     con.execute(
                         "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL "
                         "DEFAULT 'global'"
                     )
+                con.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)"
+                )
             self._fts_error: str | None = None
             try:
                 with self._txn() as con:
