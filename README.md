@@ -8,8 +8,10 @@ A persistent memory layer for LLM agents with continuous learning: a local
 "hippocampal" memory that writes without re-indexing, forgets via trace
 dynamics, and consolidates episodes into semantics during "sleep".
 
-**Status: v0.4 — single SQLite store shared by all processes, global/project
-memory scopes, hybrid FTS5 search, thresholds calibrated on real text.**
+**Status: v0.5 — retrieval defaults to an exact cosine scan over an in-process
+embedding cache (complete recall, no candidate-generation ceiling), one SQLite
+store shared by all processes, global/project memory scopes, hybrid FTS5
+search, thresholds calibrated on real text.**
 
 ## The idea in a nutshell
 
@@ -155,48 +157,59 @@ episodes fade, retention dynamics across sleeps, hook failures.
 
 ## Phase 0 results (real runs)
 
-Synthetic benchmark (`bench_recall`, hashing embedder, dim=2048):
-
-| Metric | 1500 facts | 5000 facts |
-|---|---|---|
-| pipeline hits@10 | **1.000** | 0.997 |
-| baseline hits@10 (exact cosine, same embedder) | 1.000 | 1.000 |
-| abstention on noise queries | **1.00** | 0.95 |
-| recall p50 / p95, ms | 2.5 / 3.1 | 3.8 / 5.0 |
-| writes/sec | 419 | 321 |
-
 Real-text benchmark (`bench_real`, fastembed MiniLM dim=384, 103 RU/EN facts,
 89 queries — paraphrases, exact tokens, noise):
 
-| Metric | before calibration | after calibration |
-|---|---|---|
-| paraphrase hits@10 / MRR | 0.741 / 0.611 | **0.870 / 0.698** |
-| exact-token hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** |
-| abstention on noise | 0.00 | 0.30 |
-| false merges by the write gate | 85 of 89 facts | **0** (88 create) |
-| duplicate paraphrases recognized | partial | 14 / 14 |
+| Metric | before calibration | after calibration | v0.5 exact engine |
+|---|---|---|---|
+| paraphrase hits@10 / MRR | 0.741 / 0.611 | 0.870 / 0.698 | **0.889 / 0.709** |
+| exact-token hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** | 1.000 / 0.956 |
+| abstention on noise | 0.00 | 0.30 | **0.55** |
+| false merges by the write gate | 85 of 89 facts | **0** (88 create) | 0 |
+| duplicate paraphrases recognized | partial | 14 / 14 | 14 / 14 |
 
-Lesson from the synthetic benchmark: it scored 1.000 while default thresholds
-on real text merged almost everything into a few blobs — the calibration is now
-derived from benchmark distributions and lives in the embedder profile.
-The same real-text benchmark includes a naive full-scan cosine baseline:
-the pipeline wins clearly on exact tokens (1.000 vs 0.800), is on par on
-paraphrases, and currently abstains less aggressively than a pure threshold —
-see [`docs/ARCHITECTURE.md` §7.2](docs/ARCHITECTURE.md).
-Scale sweep (10k–50k traces) with honest findings about a recall-quality cliff
-at 30k on synthetic data: [§7.3](docs/ARCHITECTURE.md).
+Against the naive full-scan cosine baseline the pipeline now wins on
+paraphrase ranking quality (MRR 0.709 vs 0.677) and decisively on exact
+tokens (1.000 vs 0.800); pure-threshold abstention remains stronger (0.85
+vs 0.55) — see [`docs/ARCHITECTURE.md` §7.2](docs/ARCHITECTURE.md).
 
+Scale sweep (`bench_recall`, hashing embedder dim=2048, 200 subset queries;
+the hits metric counts only facts that own their own trace — write-gate
+merges are reported separately):
+
+| Corpus | pipeline hits@10 | baseline | gate merges | abstention | recall p50/p95, ms | writes/sec |
+|---|---|---|---|---|---|---|
+| 10 000 | **1.000** | 1.000 | 3.7% | 1.00 | 23 / 64 | 105 |
+| 30 000 | **1.000** | 1.000 | 8.9% | 1.00 | 81 / 185 | 74 |
+| 50 000 | **1.000** | 1.000 | 13.2% | 1.00 | 98 / 276 | 58 |
+
+The recall-quality cliff between 10k and 30k that motivated v0.5 no longer
+exists: the exact-scan engine matches the all-traces baseline everywhere.
+`gate merges` is a corpus property of the novelty gate (lexically close
+object-token twins merge above θ_reinforce by birthday-paradox growth),
+not a retrieval loss; latencies are for the artificial dim=2048 setup —
+at production dim=384 the same work costs roughly an order less.
 Details and the negative Hamming-SDM result in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §3 and §7.
 
-Tests: **122 passed**.
+Lesson kept from the synthetic benchmark history: it scored 1.000 while
+default thresholds on real text merged almost everything into blobs — the
+calibration still lives in per-embedder profiles, and the gate-merge share
+is published rather than hidden inside the hit rate.
+
+Tests: **137 passed**.
 
 ## Architecture
 
-In short: **L1** — `SDRVotingIndex`, pointer voting over an inverted index of
-SDR units (capacity + candidates), **L2** — an assembly network over the same
-units (associations, completion, multi-hop), topped with an exact embedding
-rerank, a novelty gate, decay policies and an offline consolidator ("sleep").
+Retrieval by default is an **exact cosine scan over an in-process embedding
+cache** (numpy gemv over active traces; early termination is provably lossless
+for the ranking because direct confidence ≤ cosine). Past
+`exact_scan_max_traces` the engine falls back to **L1** — `SDRVotingIndex`,
+pointer voting over an inverted index of SDR units — trading completeness for
+memory footprint. **L2**, an assembly network over the same units
+(associations, completion, multi-hop) plus a keyword channel (FTS5), the
+novelty gate, decay policies and the offline consolidator ("sleep") complete
+the stack.
 
 Module interfaces are fixed in [`docs/CONTRACTS.md`](docs/CONTRACTS.md);
 research background and sources in [`docs/RESEARCH.md`](docs/RESEARCH.md).

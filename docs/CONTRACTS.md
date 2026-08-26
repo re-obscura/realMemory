@@ -57,7 +57,8 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
 
 @dataclass(frozen=True) ConsolidationReport:
     edges_committed: int; edges_pruned: int
-    promoted_to_semantic: int; rewards_applied: int; elapsed_ms: float
+    promoted_to_semantic: int; rewards_applied: int
+    journal_pruned: int; elapsed_ms: float
 
 @dataclass MemoryRecord:  # internal storage unit
     id, text, kind, status, meta,
@@ -68,23 +69,28 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
 ```
 
 Invariants: `0 ≤ cosine, confidence, retention ≤ 1`; abstained means "no
-trustworthy memories" (empty after filters or the flat-noise rule fired — see
-recall); a superseded trace has `superseded_by != None` and `valid_to != None`.
+trustworthy memories" (empty after filters, or the flat-noise / below-null
+rules fired — see recall); a superseded trace has `superseded_by != None` and
+`valid_to != None`.
 
 ## config.py — `MemoryConfig`
 
 A single dataclass of all hyperparameters (see field docstrings). Key groups:
 encoding (`dim, n_units, k_sparse, sdr_seed`), L1 (`bucket_cap,
 recall_oversample`), gate (`theta_reinforce ≥ theta_link > cos_min_recall`),
-abstention (`cos_min_strong_recall ≥ cos_min_recall`, `abstain_spread_cos`),
+abstention (`cos_min_strong_recall ≥ cos_min_recall`, `abstain_spread_cos`,
+`exact_abstain_rel_margin ≥ 0` — 0 disables the relative rule),
 decay (`tau_episodic < tau_semantic`, `min_retention_recall`,
 `initial_strength ≤ strength_cap`), links (`tau_eligibility < tau_edge_stable`,
 `edge_min_weight`, `max_pairs_per_bind`), spread (`depth, alpha, top_m, eps`),
+retrieval engine (`exact_scan_recall`, `exact_scan_max_traces` — past it
+recall/probe fall back to L1 voting; RAM cost of the cache is dim×4×traces),
 ranking (`w_votes, assoc_confidence_penalty, w_keyword`),
-operations (`backups_keep`: 0 disables pre-sleep copies).
+operations (`backups_keep`: 0 disables pre-sleep copies;
+`backup_min_interval_s`: wall-clock throttle, 0 = copy every consolidated
+sleep; `journal_max_events`: 0 disables journal rotation).
 
-Factories: `MemoryConfig.dev()` — small sizes for tests/demos;
-`MemoryConfig.production()` — phase-3 target scales.
+Factories: `MemoryConfig.dev()` — small sizes for tests/demos.
 `validate()` invariants: `theta_reinforce > theta_link > cos_min_recall`;
 `k_sparse ≤ n_units`.
 
@@ -317,14 +323,17 @@ class Hippocampus:
                scope: str | None = None, all_scopes: bool = False) -> RecallPacket
         # the query is encoded with embed_query() when the embedder provides it;
         # scope='<project>' — traces of the project + global; None/all_scopes — everything;
-        # L1 candidate budget is adaptive: floor = traces/64 (cap 1500), because
-        # vote noise grows with corpus size;
+        # candidates: exact cosine scan over the in-process embedding cache by
+        # default (complete recall; early exit once top-k is safe), L1 voting
+        # window past exact_scan_max_traces (adaptive floor = traces/64, cap
+        # 1500 — vote noise grows with corpus size);
         # FTS5 keyword channel: full token match boosts confidence,
         # partial match below the cosine floor comes back as source='keyword';
-        # abstention additionally fires on "flat noise" (opt-in via the embedder
-        # profile, cos_min_strong_recall > 0): top-1 direct below the floor,
-        # cosine spread of the direct wave < abstain_spread_cos and no full
-        # keyword match
+        # abstention additionally fires on (a) "flat noise" — opt-in via the
+        # embedder profile (cos_min_strong_recall > 0): top-1 direct below the
+        # absolute floor and flat cosine spread; (b) "below null" — exact mode
+        # opt-in (exact_abstain_rel_margin > 0): top-1 under corpus median +
+        # margin; a full keyword match cancels both
 
     def link_memories(self, ids: Sequence[int], strength=1.0) -> int
         # pairwise bind between trace SDRs; KeyError on unknown id
@@ -347,14 +356,17 @@ class Hippocampus:
 ```
 
 Recall confidence formula (fixed):
-`confidence = cosine · (w_votes + (1−w_votes)·votes_norm) · (0.3 + 0.7·retention)`;
+`confidence = cosine · (w_votes + (1−w_votes)·votes_norm) · (0.3 + 0.7·retention)`
+(`votes_norm = 0` in exact mode where votes do not exist — `w_votes` is skipped
+there so confidences are not spuriously halved);
 a full keyword match raises it up to `w_keyword · (0.3 + 0.7·retention)`;
 associated items additionally ×`assoc_confidence_penalty` with cosine floored
 at 0.05 (the link itself is a relevance signal, so no cosine filter applies to
 the association wave — only retention).
 Abstention: (a) no candidate passed the direct-wave filters
 `cos ≥ cos_min_recall` and `retention ≥ min_retention_recall`; (b) the flat
--noise rule from the recall docstring.
+-noise rule from the recall docstring; (c) the below-null rule from the
+recall docstring. Every recall journal event records `engine: exact|votes`.
 
 ## api.mcp_server
 

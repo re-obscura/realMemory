@@ -91,8 +91,9 @@ commit time; `feedback()` multiplies the strength of not-yet-committed events
 
 ```
 text → embedder → emb → SDREncoder → sdr
-SDRVotingIndex.query(sdr, oversample) + FTS5 token candidates
-   → candidates → exact cosine rerank over embeddings → best_cosine
+exact scan (default) → global cosine ranking → prefix with cos ≥ θ_link
+  (voting fallback on huge corpora: SDRVotingIndex.query + FTS5 tokens)
+→ candidates → exact cosine rerank over embeddings → best_cosine
 Novelty gate (probe sees only this scope + global):
    best_cos ≥ θ_reinforce → REINFORCE (bump base_strength, counter, timer;
                              enough reinforcements+age ⇒ semantic status,
@@ -106,23 +107,38 @@ for MiniLM they were derived from bench_real distributions (§7.2).
 
 ### Read
 
+Two candidate engines, selected per query:
+
+- **exact (default)** — `cache·q` gemv over all active-trace embeddings held
+  in process, ranked descending; rows are evaluated in cosine order in small
+  sub-batches until the top-k is complete and no unscanned trace can outrank
+  the weakest kept one (sound: direct confidence ≤ its cosine). Complete
+  recall — the §7.3 voting ceiling does not exist here.
+- **votes** — historical L1 path (`SDRVotingIndex`, oversample×k window),
+  used automatically past `exact_scan_max_traces` or when
+  `exact_scan_recall=False`.
+
 ```
-query → sdr → L1 candidates (oversample×k) ┐
-FTS5: query tokens → bm25 candidates       ├─ candidate union
-→ fetch → exact cosine rerank ←────────────┘
+ranking engine (above) ∪ FTS5 bm25 candidates → candidate universe
 per-trace channel:
    full keyword-match (all query tokens present in the trace text)
       → confidence boosted up to w_keyword·(0.3+0.7·retention);
         source stays "direct" if cosine itself passed cos_min_recall,
         otherwise "keyword"
-   cos ≥ cos_min_recall → direct: conf = cos·(w_v+(1−w_v)·votes_norm)·(0.3+0.7·ret)
+   cos ≥ cos_min_recall → direct:
+      conf = cos·(w_v+(1−w_v)·votes_norm)·(0.3+0.7·ret); votes absent in
+      exact mode ⇒ w_votes ignored there (confidence = cos·ret-factor)
    partial FTS-match below the cosine floor → keyword:
       conf = w_keyword·overlap·(0.3+0.7·retention)
    else dropped; everywhere retention ≥ min_retention_recall, scope filter
-abstention "flat noise": top-1 direct < cos_min_strong_recall,
-   direct-wave cosine spread < abstain_spread_cos and no full keyword match
-   ⇒ empty packet with abstained=true (embedder anisotropy noise is
-   indistinguishable from "no answer" — abstaining is more honest)
+abstention rules (empty packet with abstained=true):
+   "flat noise" — opt-in via profile (cos_min_strong_recall > 0):
+      top-1 below the absolute strong floor and the wave is flat;
+   "below null" — exact mode, opt-in via profile margin:
+      top-1 cosine under corpus-median + exact_abstain_rel_margin;
+      the median is an ambient similarity center that scales itself across
+      embedding dimensions; a full keyword match cancels both rules
+      (an exact token is trustworthy by itself)
 → association wave (if direct hits < k): spread from SDRs of top traces over
   L2 edges → units → inverted unit→traces index → extra candidates;
   NO cosine filter here (the link itself is a relevance signal), only
@@ -240,41 +256,35 @@ Phase-0 gate (pipeline ≥ baseline−0.02 and abstention ≥ 0.9): **PASS** at 
 
 Capacity parameters scaled with the corpus (n_units=16384 beyond 5k facts —
 otherwise palimpsest eviction starts, which is forgetting-by-design, not a bug).
+Since v0.5 the hits metric counts only queries whose fact owns its own trace;
+facts merged by the novelty gate are published as a separate share.
 
-| Corpus | pipeline hits@10 | abstention | recall p50/p95, ms | writes/sec | reopen rebuild, s |
-|---|---|---|---|---|---|
-| 1 500 | 1.000 | 1.00 | 2.5 / 3.1 | 419 | — |
-| 10 000 | 0.99 | 1.00 | 13.2 / 13.9 | 97 | 1.8 |
-| 30 000 | 0.91 | 0.95 | 25.9 / 27.4 | 69 | 7.5 |
-| 50 000 | 0.94 | 0.95 | 37.4 / 40.2 | 58 | 14.2 |
-
-Current state includes two mitigations: the flat-noise heuristic is opt-in
-(see below) and the L1 candidate budget grows with the corpus
-(floor = traces/64, cap 1500 — vote noise scales with corpus size).
+| Corpus | pipeline hits@10 | baseline | gate merges | abstention | recall p50/p95, ms | writes/sec | reopen, s |
+|---|---|---|---|---|---|---|---|
+| 10 000 | **1.000** | 1.000 | 3.7% | 1.00 | 23 / 64 | 105 | 1.8 |
+| 30 000 | **1.000** | 1.000 | 8.9% | 1.00 | 81 / 185 | 74 | 7.3 |
+| 50 000 | **1.000** | 1.000 | 13.2% | 1.00 | 98 / 276 | 58 | 14.9 |
 
 Honest findings:
 
-- Latency, throughput and reopen-rebuild scale gracefully to 50k traces;
-  rebuild is roughly linear in corpus size.
-- A **recall-quality cliff appears between 10k and 30k** with this setup.
-  Root cause was traced with instrumentation, in two layers:
-  1. *Fixed*: the flat-noise abstention heuristic shipped with defaults tuned
-     for anisotropic semantic embedders and misfired on the hashing embedder
-     (dim=2048 compresses the whole cosine band), discarding correct answers
-     wholesale (~4pp of misses at 30k, plus silently inflating abstention to
-     1.00). It is now **opt-in via the embedder profile**
-     (`cos_min_strong_recall > 0`); the fastembed profile keeps it on.
-  2. *Open, phase 1*: vote-based candidate generation has an intrinsic
-     coverage ceiling on weak-overlap subset queries. Measured at 30k:
-     target-in-top-N votes = 0.89 @N=60, 0.93 @300, 0.96 @600, **0.98 @1200**,
-     saturating — ~2% of targets share so few SDR units with the query that
-     thousands of common-token competitors outvote them at any budget.
-     The adaptive budget buys back part of the loss (+4pp at 30k) for
-     ~+10–16 ms p50; full recovery needs phase-1 remedies: IDF-style
-     unit-frequency weighting of votes, or an embedding cache with exact-scan
-     merge (candidates = top-votes ∪ top-exact).
-- Non-monotonicity between 30k and 50k runs is within sampling noise of 100
-  queries plus eviction randomness.
+- **The v0.4 cliff between 10k and 30k is gone.** Root causes were two:
+  the write-gate misfire of the flat-noise abstention rule (fixed in e08d3ce,
+  made opt-in) and the intrinsic coverage ceiling of vote-based candidate
+  generation (~89% of targets in top-60 votes at 30k regardless of budget).
+  The exact-scan engine removes the second cause by construction: hits equal
+  the all-traces cosine baseline at every scale measured.
+- Latency is now O(corpora × dim) per query in the synthetic dim=2048 setup;
+  at production dim=384 the same gemv work is roughly an order cheaper.
+  `writes/sec` includes embedding every written text.
+- The growing `gate merges` column is a write-side property: object tokens of
+  this generator sit near θ_reinforce=0.45 under hashing, and lexically close
+  twins merge by birthday-paradox growth. Merged facts have no trace of their
+  own, so their queries legitimately cannot hit — publishing the share keeps
+  that loss visible instead of hiding it inside the hit rate.
+- Abstention stays at 1.00 via the relative "below null" rule (top-1 must
+  exceed the corpus median by exact_abstain_rel_margin): the exact engine
+  sees marginal pseudo-matches that the narrow voting window physically could
+  not reach, and an absolute threshold cannot separate them portably.
 
 A quantitative comparison against LLM-backed memory services (mem0/Zep/Letta)
 is deliberately deferred until after dogfooding: they sit on a different axis
@@ -286,13 +296,18 @@ and cost/latency columns.
 103 facts from adjacent domains, 54 paraphrase queries, 15 exact-token queries,
 20 noise queries; 14 duplicate-paraphrase facts probing the write gate.
 
-| Metric | before calibration | after calibration |
-|---|---|---|
-| paraphrase hits@10 / MRR | 0.741 / 0.611 | **0.870 / 0.698** |
-| exact tokens hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** |
-| abstention on noise | 0.00 | 0.30 |
-| false gate merges (base facts) | 85 of 89 | **0** (88 create) |
-| duplicates recognized by the gate | partial | 14 / 14 |
+| Metric | before calibration | after calibration | v0.5 exact engine |
+|---|---|---|---|
+| paraphrase hits@10 / MRR | 0.741 / 0.611 | 0.870 / 0.698 | **0.889 / 0.709** |
+| exact tokens hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** | 1.000 / 0.956 |
+| abstention on noise | 0.00 | 0.30 | **0.55** |
+| false gate merges (base facts) | 85 of 89 | **0** (88 create) | 0 |
+| duplicates recognized by the gate | partial | 14 / 14 | 14 / 14 |
+
+Against the naive full-scan baseline (v0.5 run): pipeline MRR on paraphrases
+0.709 vs naive 0.677 — the composite confidence now ranks better than raw
+cosine; exact tokens stay decisively ahead (1.000 vs 0.800); pure-threshold
+abstention remains stronger on noise (0.85 vs 0.55).
 
 Calibration distributions (the basis of the MiniLM threshold profile):
 the null "fact—nearest neighbor" p50=0.478/p95=0.578/max=0.653 against the
@@ -302,13 +317,13 @@ LINK). Mean-centering did not help; multilingual-e5-large also failed to
 separate this corpus (noise p95=0.798 vs target p50=0.856) at ~20× cost —
 a negative result we record.
 
-Tests: **122 passed** (unit contracts of all modules + end-to-end scenarios:
+Tests: **137 passed** (unit contracts of all modules + end-to-end scenarios:
 novelty gate, supersede, abstention, positive/negative feedback, forgetting,
 associative multi-hop after sleep, save/reload identity, namespace and scope
 isolation, embedder identity and geometry guards, multi-process state
 integrity, v0.3 legacy migration, stdio-e2e MCP, operational guarantees).
 
-## 8. Limitations of v0.4 (honestly)
+## 8. Limitations of v0.5 (honestly)
 
 - The default embedder is feature-hashing (lexical similarity, no semantics).
   The collision floor on unrelated texts is ~0.12 at dim=2048 —
@@ -318,21 +333,25 @@ integrity, v0.3 legacy migration, stdio-e2e MCP, operational guarantees).
   top-1 cosine above `cos_min_strong_recall` (~30% of bench_real noise) passes.
   The flat-noise rule removes part of it; full elimination requires a
   contrastive retrieval embedder (multilingual-e5-large tested — does not
-  separate this corpus better at ~20× cost).
+  separate this corpus better at ~20× cost). The relative "below null" rule
+  fixes the synthetic hashing harness (§7.3) but is deliberately off for
+  semantic profiles: paraphrases there legitimately live near the null median.
 - Associative links surface in recall only after the first consolidation; the
   edge CSR cache refreshes by `edges_rev` versioning — other processes'
   consolidations become visible at the next recall, within-sleep staleness is
   acceptable.
 - Automatic contradiction detection — phase 2 (currently explicit `update_fact`).
-- L1 performance is Python dict/deque: graceful to 50k traces on latency and
-  rebuild (§7.3), but a recall-quality cliff appears between 10k and 30k on the
-  synthetic setup (post-fetch stage under hashing-collision density; open
-  phase-1 issue). Beyond 10⁵–10⁶ traces the hot path moves to numpy/CUDA
-  (phase 3).
-- Recall quality at scale: the write-gate misfire is fixed (opt-in abstention),
-  but vote-based candidate generation caps at ~98% coverage on weak-overlap
-  queries regardless of budget (§7.3); closing the last gap needs IDF-weighted
-  voting or an embedding-cache exact merge (phase 1).
+- Exact scan costs: RAM for the embedding cache (dim×4 bytes × traces per
+  process) and O(N·dim) per recall/probe. At dim=2048 synthetic scales that
+  measures as p50 ~20–40 ms with write throughput dropping to ~70/s; at the
+  production dim=384 the same work is an order of magnitude cheaper. Past
+  `exact_scan_max_traces` the engine falls back to L1 voting, which retains
+  its own known ceiling (~98% coverage on weak-overlap queries regardless of
+  budget) — closing that gap would need IDF-weighted votes or an embedding
+  cache even larger than the exact-scan limit; deliberate trade, documented.
+- Negative feedback weakens traces toward forgetting but never deletes them:
+  retention-floor filtering hides them from recall while rows and their cache
+  slots stay until a future garbage-collection pass.
 - No quantitative comparison against LLM-backed memory services yet
   (mem0/Zep/Letta): different trade-off axis — local, deterministic, zero-cost
   writes vs richer semantics through LLM extraction. A quality+cost harness is
