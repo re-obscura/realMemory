@@ -1,209 +1,211 @@
 # realMemory
 
-Персистентный слой памяти для LLM-агентов с непрерывным дообучением: локальная
-«гиппокампальная» память, которая пишет без переиндексации, забывает по динамике
-следов и консолидирует эпизоды в семантику во время «сна».
+[![ci](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml/badge.svg)](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Статус: v0.4 — единое SQLite-хранилище для всех процессов, скоупы
-global/проекты, гибридный поиск FTS5, бенчмарк на реальном тексте.**
+A persistent memory layer for LLM agents with continuous learning: a local
+"hippocampal" memory that writes without re-indexing, forgets via trace
+dynamics, and consolidates episodes into semantics during "sleep".
 
-## Идея в двух словах
+**Status: v0.4 — single SQLite store shared by all processes, global/project
+memory scopes, hybrid FTS5 search, thresholds calibrated on real text.**
 
-LLM остаётся замороженной («кора»). realMemory — отдельный мутируемый модуль
-(«гиппокамп»):
+## The idea in a nutshell
 
-- **Запись через гейт новизны**: известный факт потенцируется, связный — линкуется,
-  новый — аллоцируется. Никакого зарастания переформулировками.
-- **Общая и проектная память**: каждый след помечен скоупом (`global` или имя
-  проекта); recall видит свой проект + global, чужие проекты не подмешиваются.
-- **Забывание из динамики следов**: у каждого следа retention затухает по экспоненте,
-  подкрепления продлевают жизнь, частично подкреплённые эпизоды повышаются до
-  семантических (медленное затухание). Кривая Эббингауз — свойство синапса, а не cron-job.
-- **Ассоциативный граф бесплатно**: то, что вспоминалось вместе, связывается
-  пластичностью (STDP-подобное правило) — multi-hop обход возникает из статистики
-  использования, а не из LLM-извлечения сущностей.
-- **Гибридный поиск**: к семантике добавлен канал точных токенов (FTS5) — ID
-  ошибок, названия пакетов и коды находятся даже когда косинус мал.
-- **Сон**: офлайн-консолидация — коммит eligibility-следов, распад и обрезка слабых
-  связей, повышение статусов. Всё состояние в одной SQLite-базе: MCP-сервер и хуки
-  работают одновременно без потери данных.
+The LLM stays frozen ("cortex"). realMemory is a separate mutable module
+("hippocampus"):
 
-## Быстрый старт
+- **Novelty-gated writes**: a known fact gets potentiated, a related one is
+  linked, a fresh one allocates a new trace. Reformulations never pile up.
+- **Shared + per-project memory**: every trace carries a scope (`global` or a
+  project name); recall sees the current project plus `global` and never mixes
+  contexts.
+- **Forgetting from trace dynamics**: each trace's retention decays
+  exponentially, reinforcements extend its life, sufficiently reinforced
+  episodes promote to semantic traces (slow decay). The forgetting curve is a
+  property of the synapse, not a cron job.
+- **An associative graph for free**: whatever was recalled together gets bound
+  by plasticity (an STDP-like rule) — multi-hop traversal emerges from usage
+  statistics, not from LLM entity extraction.
+- **Hybrid retrieval**: exact-token search (FTS5) complements embeddings —
+  error IDs, package names and codes are found even when cosine similarity is low.
+- **Sleep**: offline consolidation commits eligibility traces, decays/prunes weak
+  links and promotes statuses. All state lives in one SQLite database: an MCP
+  server and hooks run concurrently without losing data.
+
+## Quick start
 
 ```bash
 pip install -e ".[dev]"
-pytest                # полный набор тестов ядра
-python -m realmemory.eval.bench_recall --facts 1500 --queries 200
+pytest                # full core test suite
+python -m realmemory.eval.bench_recall --facts 1500 --queries 200   # synthetic
+python -m realmemory.eval.bench_real                                # real-text (fastembed)
 ```
 
 ```python
 from realmemory import Hippocampus, MemoryConfig
 
 hippo = Hippocampus.open("./rm_data", config=MemoryConfig.dev())
-hippo.remember("Проект использует PostgreSQL 16 и миграции через alembic",
-               scope="myproject")            # факт проекта
-hippo.remember("Максим предпочитает краткие ответы")  # global по умолчанию
+hippo.remember("The project uses PostgreSQL 16 with alembic migrations",
+               scope="myproject")            # a project-scoped fact
+hippo.remember("The user prefers concise answers") # global by default
 
-packet = hippo.recall("какая база данных у проекта?", scope="myproject")
+packet = hippo.recall("which database does the project use?", scope="myproject")
 for item in packet.items:
     print(f"[{item.confidence:.2f}] ({item.source}) {item.text}")
 if packet.abstained:
-    print("надёжных воспоминаний нет")   # воздержание вместо галлюцинации
+    print("no trustworthy memories")     # abstention instead of hallucination
 
-hippo.consolidate()   # «сон»: коммит следов, распад слабых связей
+hippo.consolidate()   # "sleep": commit traces, decay weak links
 ```
 
-## Локальный эмбеддер
+## Local embedder
 
-По умолчанию ядро использует детерминированный `HashingEmbedder` (без моделей).
-Боевой локальный семантический эмбеддер — fastembed (ONNX Runtime, CPU):
+By default the core uses a deterministic `HashingEmbedder` (no models).
+The production local semantic embedder is fastembed (ONNX Runtime, CPU):
 
 ```bash
 pip install 'realmemory[local]'
 ```
 
-- Модель: `paraphrase-multilingual-MiniLM-L12-v2`, **dim=384**, русский+английский.
-- Кэш модели: `~/.cache/realmemory/fastembed` (~240 МБ), скачивается один раз.
-- Нагрузка (замерено): RAM процесса ~580 МБ; ~65–75 мс на текст на CPU;
-  recall целиком ≈ 77 мс. Для агента это незаметно.
-- Асимметрия учтена: факты кодируются `embed()`, запросы — `embed_query()`.
-- Пороги гейта калибруются под анизотропию модели: профиль порогов живёт в
-  `FastEmbedProvider.recommended_thresholds`, применяется сервером при старте
-  и выведен из бенчмарка реального текста (см. ниже).
+- Model: `paraphrase-multilingual-MiniLM-L12-v2`, **dim=384**, Russian+English.
+- Model cache: `~/.cache/realmemory/fastembed` (~240 MB), downloaded once.
+- Measured load: ~580 MB process RAM; ~65–75 ms per text on CPU;
+  a full recall ≈ 77 ms. Invisible to the agent.
+- Asymmetry is handled: facts are encoded with `embed()`, queries with `embed_query()`.
+- Gate thresholds are calibrated per model anisotropy: the threshold profile
+  lives in `FastEmbedProvider.recommended_thresholds`, applied at server start,
+  derived from the real-text benchmark (see below).
 
-## Подключение к ZCode / Claude Code (MCP)
+## Wiring into ZCode / Claude Code (MCP)
 
-Сервер уже настроен в `~/.zcode/cli/config.json` (user scope → доступен во всех
-проектах):
+Register a user-scope stdio server in your client config:
 
 ```json
 "realmemory": {
   "type": "stdio",
-  "command": "D:\\projs\\realMemory\\.venv\\Scripts\\python.exe",
+  "command": "/path/to/venv/Scripts/python.exe",
   "args": ["-m", "realmemory.api.mcp_server",
-           "--path", "D:\\projs\\realMemory\\rm_data",
+           "--path", "/path/to/rm_data",
            "--embedder", "local"]
 }
 ```
 
-Тулы агента (названы как когнитивные действия): `recall(query,k,project)` ·
-`memorize(text,kind,related_ids,project)` ·
-`reflect(memory_ids,reward)` · `revise(old_id,new_text)` ·
-`introspect()` · `dream_log()`.
-После рестарта ZCode сервер подключится автоматически.
+Agent tools (named as cognitive actions): `recall(query,k,project)` ·
+`memorize(text,kind,related_ids,project)` · `reflect(memory_ids,reward)` ·
+`revise(old_id,new_text)` · `introspect()` · `dream_log()`.
 
-**Общая и проектная память**: каждый след помечен скоупом — `global`
-(предпочтения, идентичность) или имя проекта. Проект определяется
-автоматически (`REALMEMORY_PROJECT` → `ZCODE_PROJECT_DIR` → рабочая директория
-с `.git`), можно передать явно параметром `project` или `--project` серверу.
-`recall` ищет в своём проекте + global; чужие проекты не подмешиваются.
-Политика для агента описана в описаниях тулов и скилле `realmemory`.
+**Shared + per-project memory**: every trace is tagged with a scope — `global`
+(preferences, identity) or a project name. The project is detected
+automatically (`REALMEMORY_PROJECT` → `ZCODE_PROJECT_DIR` → current directory
+containing `.git`); it can also be passed explicitly via the `project`
+argument or `--project`. `recall` searches the current project + global;
+other projects never leak in.
 
-Изоляция проектов: добавьте `"--namespace", "<имя>"` в args — память переедет в
-подкаталог `<path>/<namespace>`; контексты разных проектов не смешиваются.
-База хранит маркер эмбеддера (`db_meta`) и отказывается открываться с другим
-эмбеддером — старые и новые векторы несравнимы по косинусу.
+Full namespace isolation between separate brains is available via
+`Hippocampus.open(path, namespace=...)` / `--namespace`.
 
-## Автоматизация: чтобы агенты пользовались без напоминаний
+The database stores an embedder marker (`db_meta`) and refuses to open with a
+different one — old and new vectors are not comparable by cosine.
 
-Три механизма, установленные по умолчанию:
+## Automation: making agents actually use it
 
-1. **Скилл `realmemory`** (`~/.agents/skills/realmemory/`) — политика «когда
-   вспоминать / записывать / давать feedback», автоматически подгружается по
-   описанию во всех поддерживающих скиллы инструментах.
-2. **`~/.zcode/AGENTS.md`** — короткий блок правил памяти, попадает в контекст
-   каждой сессии безусловно.
-3. **Хуки** (в `~/.zcode/cli/config.json`, runner включён):
-   - `SessionStart` → `python -m realmemory.hook_cli brief` — инжектит в
-     начало сессии краткое состояние памяти: семантические факты и прочные
-     эпизоды своего проекта + global, бюджет ~600 символов;
-   - `Stop` → `python -m realmemory.hook_cli sleep` — консолидация («сон»)
-     после ответа; троттлинг по состоянию базы: пропускает, если с прошлого
-     сна не было ни записей, ни feedback. Работает ~0.3 c, модель эмбеддера
-     не загружает.
-   - Хуки и MCP-сервер безопасно работают одновременно: всё состояние в
-     SQLite, конкурентные «сны» сериализуются транзакцией.
+Three mechanisms, installed by default:
 
-## Эксплуатация
+1. **Skill / instructions** describing when to recall / memorize / reflect,
+   loaded into every session context.
+2. **SessionStart hook** → `python -m realmemory.hook_cli brief` — injects a
+   short memory state: semantic facts and durable episodic traces of the
+   current project + global, ~600 character budget.
+3. **Stop hook** → `python -m realmemory.hook_cli sleep` — consolidation after
+   each answer; throttled by database state (skips when nothing changed since
+   the last sleep). Takes ~0.3 s, does not load the embedder model.
 
-- **Бэкапы**: перед каждым «сном» база копируется в `<каталог памяти>/backups/`
-  (консистентный sqlite backup API), хранятся последние 10 копий
-  (`backups_keep` в конфиге; 0 — выключить). Перед любой миграцией схемы
-  создаётся страховочная копия автоматически.
-- **Версия схемы** фиксируется в `db_meta.schema_version`; обновление кода
-  мигрирует базу при первом открытии.
-- **Отказы хуков не тихие**: упавший hook пишет строку в stderr сессии и
-  событие `hook_error` в журнал — видно в `python -m realmemory.report`.
-- **Дисциплина обучения**: в отчёте есть reflect/recall — если ниже ~0.1,
-  агент редко оценивает полезность воспоминаний, и распад/повышение работают
-  вслепую. Лечится напоминанием агенту пользоваться `reflect`.
-- **Маршрутизация проектов** определяется автоматически (cwd с `.git`,
-  `ZCODE_PROJECT_DIR`); проверяется одной командой — `introspect` показывает
-  текущий проект. Если сервер запущен не из корня проекта, задайте `--project`
-  или переменную `REALMEMORY_PROJECT`.
+Hooks and the MCP server safely run at the same time: all state is in SQLite,
+concurrent "sleeps" are serialized by a transaction.
 
-## Наблюдаемость («как ведёт себя память со временем»)
+## Operations
 
-Каждое событие пишется в `rm_data/journal.jsonl`: записи, recalls (латентность,
-воздержание, уверенность), feedback, консолидации с полным metrics-срезом.
-Полный отчёт в любой момент:
+- **Backups**: before every "sleep" the database is copied to
+  `<store>/backups/` (consistent sqlite backup API), last 10 copies kept
+  (`backups_keep`; 0 disables). Any schema migration takes an automatic
+  safety copy first.
+- **Schema version** recorded in `db_meta.schema_version`.
+- **Hook failures are not silent**: a failing hook prints to the session's
+  stderr and leaves a `hook_error` event in the journal, visible in the report.
+- **Learning discipline**: the report shows reflect/recall — below ~0.1 the
+  agent rarely grades recalled memories and decay/promotion run blind.
+- **Project routing** is verified with one call — `introspect` shows the
+  currently detected project.
+
+## Observability ("how the memory behaves over time")
+
+Every event is appended to the journal inside the database: writes, recalls
+(latency, abstention, confidence), feedback, consolidations with full metrics.
+Full report any time:
 
 ```bash
-python -m realmemory.report --path D:/projs/realMemory/rm_data [--json report.json]
+python -m realmemory.report --path ./rm_data [--json report.json]
 ```
 
-Показывает: рост памяти по типам/статусам, историю решений гейта новизны,
-долю воздержания и p50/p95 recall, что подкреплялось, какие эпизоды угасают,
-динамику retention между «снами».
+Shows: memory growth by type/scope/status, novelty-gate decision history,
+abstention share and p50/p95 recall latency, what got reinforced, which
+episodes fade, retention dynamics across sleeps, hook failures.
 
-## Статус фазы 0 (реальные прогоны)
+## Phase 0 results (real runs)
 
-Синтетический бенчмарк (`bench_recall`, hashing-эмбеддер, dim=2048):
+Synthetic benchmark (`bench_recall`, hashing embedder, dim=2048):
 
-| Метрика | 1500 фактов | 5000 фактов |
+| Metric | 1500 facts | 5000 facts |
 |---|---|---|
 | pipeline hits@10 | **1.000** | 0.997 |
-| baseline hits@10 (точный косинус, тот же эмбеддер) | 1.000 | 1.000 |
-| воздержание на noise-запросах | **1.00** | 0.95 |
-| recall p50 / p95, мс | 2.5 / 3.1 | 3.8 / 5.0 |
-| записей/сек | 419 | 321 |
+| baseline hits@10 (exact cosine, same embedder) | 1.000 | 1.000 |
+| abstention on noise queries | **1.00** | 0.95 |
+| recall p50 / p95, ms | 2.5 / 3.1 | 3.8 / 5.0 |
+| writes/sec | 419 | 321 |
 
-Бенчмарк реального текста (`bench_real`, fastembed MiniLM, 103 факта RU/EN,
-89 запросов — переформулировки, точные токены, шум):
+Real-text benchmark (`bench_real`, fastembed MiniLM dim=384, 103 RU/EN facts,
+89 queries — paraphrases, exact tokens, noise):
 
-| Метрика | значение |
-|---|---|
-| переформулировки hits@10 / MRR | 0.870 / 0.698 |
-| точные токены hits@10 / MRR | **1.000 / 0.956** |
-| воздержание на шуме | 0.30 |
-| ложных склеек гейтом на записи | **0** (88 create из 89) |
-| дубликаты-переформулировки распознаны | 14 / 14 |
+| Metric | before calibration | after calibration |
+|---|---|---|
+| paraphrase hits@10 / MRR | 0.741 / 0.611 | **0.870 / 0.698** |
+| exact-token hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** |
+| abstention on noise | 0.00 | 0.30 |
+| false merges by the write gate | 85 of 89 facts | **0** (88 create) |
+| duplicate paraphrases recognized | partial | 14 / 14 |
 
-Урок синтетики: она давала 1.000, но на реальном тексте пороги по умолчанию
-склеивали почти все факты в кучу — калибровка выведена из распределений
-бенчмарка и живёт в профиле эмбеддера. Подробности и отрицательный результат
-по Хэмминг-SDM — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §3 и §7.
+Lesson from the synthetic benchmark: it scored 1.000 while default thresholds
+on real text merged almost everything into a few blobs — the calibration is now
+derived from benchmark distributions and lives in the embedder profile.
+Details and the negative Hamming-SDM result in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §3 and §7.
 
-Тесты: **116 passed**.
+Tests: **122 passed**.
 
-## Архитектура
+## Architecture
 
-Коротко: **L1** — `SDRVotingIndex`, голосование указателей по инвертированному
-индексу SDR-юнитов (ёмкость + кандидаты), **L2** — сборочная сеть на тех же
-юнитах (ассоциации, достраивание, multi-hop), поверх — точный реранк по
-эмбеддингам, гейт новизны, политики затухания и офлайн-консолидатор («сон»).
+In short: **L1** — `SDRVotingIndex`, pointer voting over an inverted index of
+SDR units (capacity + candidates), **L2** — an assembly network over the same
+units (associations, completion, multi-hop), topped with an exact embedding
+rerank, a novelty gate, decay policies and an offline consolidator ("sleep").
 
-Интерфейсы модулей зафиксированы в [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
-Исследовательский фундамент и источники: [`docs/RESEARCH.md`](docs/RESEARCH.md).
+Module interfaces are fixed in [`docs/CONTRACTS.md`](docs/CONTRACTS.md);
+research background and sources in [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
-## Структура
+## Project layout
 
 ```
 src/realmemory/
-├── encoding/     # эмбеддеры, SDR-кодирование
-├── core/         # L1 SDRVotingIndex, L2 AssemblyNetwork, пластичность
-├── policies/     # гейт новизны, затухание/повышение следов
-├── store/        # SQLite-хранилище, журнал пластичности
-├── api/          # MCP-сервер
-└── eval/         # бенчмарки
+├── encoding/     # embedders, SDR encoding
+├── core/         # L1 SDRVotingIndex, L2 AssemblyNetwork, plasticity
+├── policies/     # novelty gate, trace decay/promotion
+├── store/        # SQLite storage (traces, edges, eligibility, events)
+├── api/          # MCP server
+└── eval/         # benchmarks
 ```
+
+## License
+
+[MIT](LICENSE)

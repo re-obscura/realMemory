@@ -1,261 +1,278 @@
-# Архитектура realMemory
+# realMemory Architecture
 
-Статус: v0.4 (единое SQLite-хранилище для всех процессов, скоупы global/проекты,
-гибридный поиск FTS5, калибровка порогов на реальном тексте, 116 тестов,
-gate PASS).
-Документ фиксирует принятые проектные решения и их основания; изменения через
-правку этого файла в том же коммите.
+Status: v0.4 (single SQLite store shared by all processes, global/project
+scopes, hybrid FTS5 search, thresholds calibrated on real text, 122 tests,
+phase-0 gate PASS).
+This document records design decisions and their rationale; changes go through
+an edit of this file in the same commit.
 
-## 1. Позиционирование
+## 1. Positioning
 
-Локальный однопользовательский сервис персистентной памяти для LLM-агентов.
-LLM остаётся замороженной; realMemory — отдельный мутируемый модуль, живущий
-между сессиями и обучающийся непрерывно локальными правилами пластичности,
-без градиентного спуска.
+A local single-user persistent memory service for LLM agents. The LLM stays
+frozen; realMemory is a separate mutable module living across sessions and
+projects, learning continuously via local plasticity rules, without gradient
+descent.
 
-Не-goals v1: мультиарендный SaaS, RAG по большим корпусам, дообучение весов LLM.
+Non-goals for v1: multi-tenant SaaS, RAG over large corpora, fine-tuning LLM weights.
 
-## 2. Карта «биология → система»
+## 2. Biology → system map
 
-| Биология | Компонент |
+| Biology | Component |
 |---|---|
-| Энторинальная кора | Замороженный эмбеддер текста (`EmbeddingProvider`) |
-| Зубчатая извилина (pattern separation) | SDR: k on-битов из N юнитов (`SDREncoder`) |
-| CA3 (аттрактор, достраивание) | Сборочная сеть L2 c пластичными связями + spread/cleanup |
-| CA1 (детекция новизны) | Гейт записи по косинусной близости к известным следам |
-| Гиппокамп (быстрый след) | Указатели следа в бакетах юнитов L1 (`SDRVotingIndex`) |
-| Кора (медленная память) | Семантические следы: повышенный статус → медленное затухание |
-| Sharp-wave replay («сон») | Офлайн-консолидатор: коммит следов, распад, повышение, снапшот |
-| Нейромодуляция (дофамин) | Третий фактор: `feedback()` усиливает свежие eligibility-события |
+| Entorhinal cortex | Frozen text embedder (`EmbeddingProvider`) |
+| Dentate gyrus (pattern separation) | SDR: k on-bits out of N units (`SDREncoder`) |
+| CA3 (attractor, completion) | Assembly network L2 with plastic links + spread/cleanup |
+| CA1 (novelty detection) | Write gate by cosine proximity to known traces |
+| Hippocampus (fast trace) | Trace pointers in L1 unit buckets (`SDRVotingIndex`) |
+| Cortex (slow memory) | Semantic traces: promoted status → slow decay |
+| Sharp-wave replay ("sleep") | Offline consolidator: trace commit, decay, promotion |
+| Neuromodulation (dopamine) | Third factor: `feedback()` amplifies fresh eligibility events |
 
-## 3. Уровни ядра
+## 3. Core levels
 
-### L1 — SDRVotingIndex (адресация голосованием)
+### L1 — SDRVotingIndex (voting addressing)
 
-**Задача:** кандидаты при recall без скана всей базы; запись O(k) без
-переиндексации.
+**Purpose:** recall candidates without scanning the whole base; O(k) writes
+without re-indexing.
 
-**Механика:** след пишет указатель (id в SQLite) в бакеты всех своих k on-битов;
-запрос суммирует попадания по своим on-битам и отдаёт top-k указателей по
-голосам. Коррелированные паттерны делят часть юнитов, поэтому целевой указатель
-набирает ~ρ·k голосов против ~k²/N у случайных — robust-LSH поведение.
-Нейроморфная интерпретация: юниты — нейроны, записи в бакеты — аксональные
-указатели, голоса — суммация пресинаптических совпадений, top-k — WTA.
-Вытеснение при переполнении бакета — FIFO (palimpsest под давлением);
-горизонт вытеснения ≈ `bucket_cap / (corpus·k/N)` следов.
+**Mechanics:** a trace writes a pointer (its SQLite id) into the buckets of all
+its k on-bits; a query sums hits over its own on-bits and returns top-k
+pointers by votes. Correlated patterns share some units, so the target pointer
+collects ~ρ·k votes versus ~k²/N for random ones — robust-LSH behavior.
+Neuromorphic reading: units are neurons, bucket writes are axonal pointers,
+votes are presynaptic coincidence summation, top-k is WTA.
+Bucket overflow eviction is FIFO (palimpsest under pressure); eviction horizon
+≈ `bucket_cap / (corpus·k/N)` traces.
 
-**Отрицательный результат (зафиксирован честно):** первая реализация была
-классическим Kanerva-SDM на плотных биполярных адресах с Хэмминг-радиусом
-доступа. Она провалила бенчмарк на семантически близких запросах: hits@10 =
-0.495 против 1.00 у точного косинуса (1500 фактов). Причина — концентрация
-Хэмминговой метрики: расстояния двух случайных пар антикоррелированы, поэтому
-«шары доступа» паттернов с cos≈0.6 почти не пересекаются; радиус, ловящий
-почти-дубликаты, не ловит ничего умеренно-похожего. Голосование по общим
-юнитам разреженного кода этого дефекта не имеет — оно измеряет близость
-напрямую. Урок: в концентрированных метриках пороговые шары — плохой
-носитель «близости»; пересечение разреженных представлений — хороший.
+**Negative result (recorded honestly):** the first implementation was classic
+Kanerva SDM over dense bipolar addresses with a Hamming access radius. It
+failed the benchmark on semantically close queries: hits@10 = 0.495 vs 1.00
+for exact cosine (1500 facts). The cause is Hamming-metric concentration:
+distances of random pairs are anticorrelated, so the "access spheres" of
+patterns with cos≈0.6 barely intersect; a radius catching near-duplicates
+catches nothing moderately similar. Voting over shared units of a sparse code
+has no such defect — it measures proximity directly. Lesson: in concentrated
+metrics, threshold balls are a poor carrier of "closeness"; intersection of
+sparse representations is a good one.
 
-### L2 — AssemblyNetwork (сборочная сеть)
+### L2 — AssemblyNetwork (assembly network)
 
-**Пространство:** те же N_units юнитов; следы суперпозицией делят юниты.
+**Space:** the same N_units; traces share units superpositionally.
 
-**Связи:** направленные рёбра key=(i·N+j) → вес float32 (dict + ленивый CSR).
-Правило накопления — BCPNN-lite: нормализованное со-вхождение (полная
-байесовская форма — фаза 3); palimpsest достигается распадом и обрезкой.
+**Links:** directed edges key=(i·N+j) → float32 weight (dict + lazy CSR).
+Accumulation rule — BCPNN-lite: normalized co-occurrence (the full Bayesian
+form is phase 3); palimpsest comes from decay and pruning.
 
-**Операции:**
-- `bind(A, B, strength)` — связывает on-биты двух следов в обе стороны;
-  сетевые часы двигаются любой записью: существующие рёбра распадаются
-  непрерывно (exp(−Δt/τ_stable)), слабые обрезаются — забывание идёт и вне «сна»;
-- `spread(units, depth)` — распространение активации по рёбрам с затуханием:
-  ассоциативный multi-hop обход графа «что с чем вспоминалось»;
-- `commit_eligibility(...)` — вливание буферизованных связей во время сна.
+**Operations:**
+- `bind(A, B, strength)` — links on-bits of two patterns both ways; network
+  clock advances on any write: existing edges decay continuously
+  (materialized lazily from `last_edge_tick`), weak edges get pruned at
+  consolidation;
+- `spread(units, depth)` — activation propagation over edges with attenuation:
+  associative multi-hop traversal of the "what was recalled together" graph;
+- `commit_eligibility(...)` — merges buffered links during sleep.
 
-**Eligibility (третий фактор):** bind'ы накапливаются в `EligibilityLog`
-с меткой времени и id источников; вклад каждого события затухает
-exp(−Δt/τ_e) к моменту коммита; `feedback()` умножает силу ещё незакоммиченных
-событий (three-factor learning, Frémaux & Gerstner 2016).
+**Eligibility (third factor):** binds accumulate in an eligibility table with
+timestamps and source ids; each event's contribution decays exp(−Δt/τ_e) by
+commit time; `feedback()` multiplies the strength of not-yet-committed events
+(three-factor learning, Frémaux & Gerstner 2016).
 
-## 4. Пути данных
+## 4. Data paths
 
-### Запись
+### Write
 
 ```
 text → embedder → emb → SDREncoder → sdr
-SDRVotingIndex.query(sdr, oversample)
-   → кандидаты → точный косинус по эмбеддингам → best_cosine
-Гейт новизны:
-   best_cos ≥ θ_reinforce → REINFORCE (bump base_strength, счётчик, таймер;
-                             достаточно подкреплений+возраст ⇒ статус semantic,
-                             τ затухания ×12 — механическая семантизация)
-   best_cos ≥ θ_link      → CREATE + пластичные связи с активными следами
-   иначе                  → CREATE (+ связи с related_ids, если переданы)
+SDRVotingIndex.query(sdr, oversample) + FTS5 token candidates
+   → candidates → exact cosine rerank over embeddings → best_cosine
+Novelty gate (probe sees only this scope + global):
+   best_cos ≥ θ_reinforce → REINFORCE (bump base_strength, counter, timer;
+                             enough reinforcements+age ⇒ semantic status,
+                             decay τ ×12 — mechanical semantization)
+   best_cos ≥ θ_link      → CREATE + plastic links to active traces
+   otherwise              → CREATE (+ links to related_ids, if passed)
 ```
 
-### Чтение
+Thresholds are per-embedder profiles (anisotropy differs between models);
+for MiniLM they were derived from bench_real distributions (§7.2).
+
+### Read
 
 ```
-query → sdr → L1 кандидаты (oversample×k) ┐
-FTS5: токены запроса → bm25-кандидаты     ├─ объединение кандидатов
-→ fetch → точный косинус-реранк ←─────────┘
-канал следа:
-   полный keyword-match (все токены запроса есть в тексте следа)
-      → confidence бустится до w_keyword·(0.3+0.7·retention);
-        источник direct, если косинус сам прошёл cos_min_recall, иначе keyword
+query → sdr → L1 candidates (oversample×k) ┐
+FTS5: query tokens → bm25 candidates       ├─ candidate union
+→ fetch → exact cosine rerank ←────────────┘
+per-trace channel:
+   full keyword-match (all query tokens present in the trace text)
+      → confidence boosted up to w_keyword·(0.3+0.7·retention);
+        source stays "direct" if cosine itself passed cos_min_recall,
+        otherwise "keyword"
    cos ≥ cos_min_recall → direct: conf = cos·(w_v+(1−w_v)·votes_norm)·(0.3+0.7·ret)
-   частичный FTS-матч при cos ниже порога → keyword:
+   partial FTS-match below the cosine floor → keyword:
       conf = w_keyword·overlap·(0.3+0.7·retention)
-   иначе — отброс; везде retention ≥ min_retention_recall, фильтр скоупа
-воздержание «плоский шум»: top1-direct < cos_min_strong_recall,
-   разброс косинусов прямой волны < abstain_spread_cos и нет полного
-   keyword-матча ⇒ пустой пакет с abstained=true (шум анизотропии эмбеддера
-   неотличим от отсутствия ответа — честнее воздержаться)
-→ волна ассоциаций (если прямых < k): spread от SDR топ-следов по рёбрам L2
-  → юниты → инвертированный индекс «юнит→следы» → дополнительные кандидаты;
-  косинусный фильтр НЕ применяется (связь сама является сигналом релевантности),
-  действует только retention; confidence × assoc_confidence_penalty,
-  пол косинуса 0.05 чтобы уверенность не обнулялась
+   else dropped; everywhere retention ≥ min_retention_recall, scope filter
+abstention "flat noise": top-1 direct < cos_min_strong_recall,
+   direct-wave cosine spread < abstain_spread_cos and no full keyword match
+   ⇒ empty packet with abstained=true (embedder anisotropy noise is
+   indistinguishable from "no answer" — abstaining is more honest)
+→ association wave (if direct hits < k): spread from SDRs of top traces over
+  L2 edges → units → inverted unit→traces index → extra candidates;
+  NO cosine filter here (the link itself is a relevance signal), only
+  retention applies; confidence × assoc_confidence_penalty, cosine floored
+  at 0.05 so confidence does not vanish
 → RecallPacket(items, abstained, latency)
 ```
 
-Воздержание: ни один кандидат не прошёл фильтры либо сработало правило плоского
-шума ⇒ `abstained=true` — система говорит «надёжных воспоминаний нет» вместо
-галлюцинации. Параметры правила выведены из bench_real: на шуме top1 p50=0.29
-при плоском разбросе, у переформулировок top1 p10=0.40 с выраженным лидером.
+Abstention: no candidate passed the filters, or the flat-noise rule fired ⇒
+`abstained=true` — the system says "no trustworthy memories" instead of
+hallucinating. Rule parameters were derived from bench_real: noise queries
+have top-1 p50=0.29 with flat spreads, paraphrase targets have top-1 p10=0.40
+with a clear leader.
 
-Скоупы: прямая и ассоциативная волны видят только следы своего проекта +
-`global` (scope=None/all_scopes снимает фильтр). Гейт записи (`_probe`)
-сравнивает текст в том же сужении — одинаковые факты разных проектов не
-сливаются в REINFORCE.
+Scopes: direct and association waves see only traces of the current project +
+`global` (scope=None/all_scopes removes the filter). The write gate probes in
+the same narrowed view — identical facts from different projects never merge
+into REINFORCE.
 
-### Обновление/противоречия
+### Update / contradictions
 
-`update_fact(old_id, new_text)` создаёт новый след force_new, старый получает
-`status='superseded'`, `valid_to`, ссылку `superseded_by` (bi-temporal),
-связь old↔new сохраняется. Суперседнутые исключены из recall по умолчанию,
-доступны через `include_superseded=True`. Автодетект противоречий
-(ко-активация конфликтующих сборок + LLM-judge во сне) — фаза 2.
+`update_fact(old_id, new_text)` creates a new trace force_new; the old one gets
+`status='superseded'`, `valid_to`, a `superseded_by` link (bi-temporal), and the
+old↔new association is kept. Superseded traces are excluded from recall by
+default, available via `include_superseded=True`; the replacement inherits the
+old trace's scope. Automatic contradiction detection (co-activation of
+conflicting assemblies + LLM-judge during sleep) — phase 2.
 
-### Сон (consolidate)
+### Sleep (consolidate)
 
-1. выкачать `EligibilityLog` из БД → стабильные рёбра L2 (с reward-усилением);
-2. распад стабильных рёбер за прошедшее время от `last_edge_tick`, обрезка слабых
-   (ленивый распад: эффективный вес считается от метки тика, материализуется
-   только внутри консолидационной транзакции — O(E) один раз за «сон», а не на
-   каждую запись);
-3. скан эпизодов: повышение до semantic по правилу продвижения;
-4. события консолидации и полный metrics-срез в журнал.
+1. drain the eligibility table → stable L2 edges (with reward amplification);
+2. decay stable edges over the elapsed time since `last_edge_tick`, prune weak
+   ones (lazy decay: effective weight is computed from the tick label and
+   materialized only inside the consolidation transaction — O(E) once per
+   sleep, not per write);
+3. scan episodes: promotion to semantic by the promotion rule;
+4. consolidation events plus a full metrics snapshot into the journal.
 
-Замечание: связи между записью и первым «сном» существуют только в
-eligibility-таблице и в ассоциативной волне recall не участвуют (коммит — во
-время консолидации). Это осознанный компромисс v0; «горячее» распространение
-незакоммиченных связей — кандидат в фазу 1.
+Note: links between a write and the first "sleep" exist only in the eligibility
+table and do not participate in the recall association wave (they commit during
+consolidation). A deliberate v0 compromise; hot propagation of uncommitted
+links is a phase-1 candidate.
 
-Параллельные «сны»: MCP-сервер и Stop-хук могут консолидировать одновременно;
-BEGIN IMMEDIATE сериализует транзакции, Δt распада считается от last_edge_tick
-после захвата блокировки — двойного распада нет, потерянных событий нет.
+Parallel sleeps: the MCP server and the Stop hook may consolidate at the same
+time; BEGIN IMMEDIATE serializes the transactions, the decay Δt is measured
+from last_edge_tick after acquiring the lock — no double decay, no lost events.
 
-## 5. Хранилище
+## 5. Storage
 
-Всё состояние в одной SQLite-базе (`memory.db`, WAL + busy_timeout +
-BEGIN IMMEDIATE) — единый источник истины для любого числа процессов:
-долгоживущий MCP-сервер и краткоживущие хуки читают и пишут одновременно,
-никто никого не затирает.
+All state lives in one SQLite database (`memory.db`, WAL + busy_timeout +
+BEGIN IMMEDIATE) — the single source of truth for any number of processes:
+a long-running MCP server and short-lived hooks read and write concurrently,
+nobody clobbers anybody.
 
-| Таблица | Содержимое |
+| Table | Contents |
 |---|---|
-| `memories` | тексты, эмбеддинги (float32 blob), SDR (int32 blob), метрики следов, цепочки supersede, `scope` |
-| `edges` | стабильные рёбра L2: key = src·n_units+dst, вес |
-| `eligibility` / `elig_sources` | незакоммиченные bind'ы (write-through при записи) и их следы-источники |
-| `events` | журнал пластичности: записи/recalls/feedback/консолидации/metrics |
-| `memories_fts` | внешний FTS5-индекс по текстам (unicode61), триггеры синхронизации |
-| `db_meta` | маркер эмбеддера, геометрия конфига, last_edge_tick, счётчики |
+| `memories` | texts, embeddings (float32 blob), SDRs (int32 blob), trace metrics, supersede chains, `scope` |
+| `edges` | stable L2 edges: key = src·n_units+dst, weight |
+| `eligibility` / `elig_sources` | uncommitted binds (write-through on write) and their source traces |
+| `events` | plasticity journal: writes/recalls/feedback/consolidations/metrics |
+| `memories_fts` | external-content FTS5 index over texts (unicode61), sync triggers |
+| `db_meta` | embedder marker, config geometry, last_edge_tick, counters |
 
-Инварианты восстановления: L1-бакеты, юнит-карта и CSR-кэш рёбер — производные
-структуры, детерминированно перестраиваются из БД при открытии; всё остальное
-живёт только в таблицах. Снапшотных файлов нет (до v0.4 был snapshot.pkl с
-last-writer-wins гонкой между процессами); наследие v0.3 импортируется
-однократно с флагами в db_meta.
+Recovery invariants: L1 buckets, the unit index and the edge CSR cache are
+derived structures, deterministically rebuilt from the database at open;
+everything else lives only in tables. There are no snapshot files (before
+v0.4 there was a snapshot.pkl with a last-writer-wins race between processes);
+v0.3 legacy is imported once, guarded by flags in db_meta.
 
-Идентичность эмбеддера: при первом открытии база запоминает `name` провайдера
-(модель + версия библиотеки) в `db_meta`; открытие с другим именем отклоняется —
-векторы разных моделей/версий несравнимы по косинусу. Там же хранится геометрия
-(dim/n_units/sdr_seed): несовместимое открытие отклоняется так же.
-Базы до введения маркировки принимают текущий эмбеддер однократно (событие
-`embedder_identity_adopted`).
+Embedder identity: at first open the database records the provider `name`
+(model + library version) in `db_meta`; opening with another name is rejected —
+vectors from different models/versions are not cosine-comparable. The same
+table stores geometry (dim/n_units/sdr_seed): incompatible opens are rejected
+too. Pre-marking databases adopt the current embedder once (an
+`embedder_identity_adopted` event).
 
-Изоляция проектов: `scope` на каждом следе (`global` или имя проекта) +
-`Hippocampus.open(path, namespace=...)` для полной файловой изоляции. Проект
-автоматически определяется через `projects.resolve_project()`: явный параметр →
-`REALMEMORY_PROJECT` → `ZCODE_PROJECT_DIR`/`CLAUDE_PROJECT_DIR` (хуки ZCode
-инжектируют сами) → рабочая директория с маркером `.git`/`.zcode`.
+Project isolation: `scope` on every trace (`global` or a project name) plus
+`Hippocampus.open(path, namespace=...)` for hard file-level isolation. The
+project is auto-detected via `projects.resolve_project()`: explicit argument →
+`REALMEMORY_PROJECT` → `ZCODE_PROJECT_DIR`/`CLAUDE_PROJECT_DIR` (injected by
+ZCode hooks automatically) → working directory containing a `.git`/`.zcode`
+marker.
 
-## 6. Интеграции
+Backups: before every sleep the database is copied (sqlite backup API) into
+`backups/` with rotation (`backups_keep`), and every schema migration takes an
+automatic safety copy first. `db_meta['schema_version']` records the schema
+version.
 
-- **MCP-сервер** (`realmemory.api.mcp_server`): тулы `recall`, `memorize`,
-  `reflect`, `revise`, `introspect`, `dream_log` — имена как когнитивные действия;
-  опциональный extra `[mcp]`;
-  запуск `python -m realmemory.api.mcp_server --path ./rm_data [--namespace ns]`.
-- Прямой Python API (`Hippocampus`) — основной контракт для тестов и SDK.
+## 6. Integrations
 
-## 7. Результаты (реальные прогоны)
+- **MCP server** (`realmemory.api.mcp_server`): tools `recall`, `memorize`,
+  `reflect`, `revise`, `introspect`, `dream_log` — named as cognitive actions;
+  optional extra `[mcp]`; run
+  `python -m realmemory.api.mcp_server --path ./rm_data [--namespace ns] [--project p]`.
+- Direct Python API (`Hippocampus`) — the primary contract for tests and SDK use.
 
-### 7.1 Синтетика (bench_recall: hashing-эмбеддер, dim=2048, непересекающиеся словари)
+## 7. Results (real runs)
 
-Бенчмарк: запросы — подмножества слов факта; baseline — точный косинус того же
-эмбеддера. Конфиг: dim=2048, n_units=2048, k=96, bucket_cap=512, cos_min=0.18.
+### 7.1 Synthetic (bench_recall: hashing embedder, dim=2048, disjoint vocabularies)
 
-| Метрика | 1500 фактов | 5000 фактов |
+Queries are word subsets of facts; baseline is exact cosine with the same
+embedder. Config: dim=2048, n_units=2048, k=96, bucket_cap=512, cos_min=0.18.
+
+| Metric | 1500 facts | 5000 facts |
 |---|---|---|
 | pipeline hits@10 | **1.000** | 0.997 |
-| baseline hits@10 (точный cos) | 1.000 | 1.000 |
-| воздержание на noise-запросах | **1.00** | 0.95 |
-| recall latency p50 / p95, мс | 2.5 / 3.1 | 3.8 / 5.0 |
-| записей/сек | 419 | 321 |
+| baseline hits@10 (exact cos) | 1.000 | 1.000 |
+| abstention on noise queries | **1.00** | 0.95 |
+| recall latency p50 / p95, ms | 2.5 / 3.1 | 3.8 / 5.0 |
+| writes/sec | 419 | 321 |
 
-Gate фазы 0 (pipeline ≥ baseline−0.02 и abstention ≥ 0.9): **PASS** на обоих масштабах.
+Phase-0 gate (pipeline ≥ baseline−0.02 and abstention ≥ 0.9): **PASS** at both scales.
 
-### 7.2 Реальный текст (bench_real: fastembed MiniLM dim=384, RU/EN)
+### 7.2 Real text (bench_real: fastembed MiniLM dim=384, RU/EN)
 
-103 факта из смежных доменов, 54 переформулировки-запроса, 15 точных токенов,
-20 шумовых; 14 дубликатов-переформулировок для проверки гейта.
+103 facts from adjacent domains, 54 paraphrase queries, 15 exact-token queries,
+20 noise queries; 14 duplicate-paraphrase facts probing the write gate.
 
-| Метрика | до калибровки | после калибровки |
+| Metric | before calibration | after calibration |
 |---|---|---|
-| переформулировки hits@10 / MRR | 0.741 / 0.611 | **0.870 / 0.698** |
-| точные токены hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** |
-| воздержание на шуме | 0.00 | 0.30 |
-| ложных склеек гейтом (база) | 85 из 89 фактов | **0** (88 create) |
-| дубликаты распознаны гейтом | частично | 14 / 14 |
+| paraphrase hits@10 / MRR | 0.741 / 0.611 | **0.870 / 0.698** |
+| exact tokens hits@10 / MRR | 0.667 / 0.633 | **1.000 / 0.956** |
+| abstention on noise | 0.00 | 0.30 |
+| false gate merges (base facts) | 85 of 89 | **0** (88 create) |
+| duplicates recognized by the gate | partial | 14 / 14 |
 
-Калибровочные распределения (основа профиля порогов MiniLM):
-нуль «факт—ближайший сосед» p50=0.478/p95=0.578/max=0.653 против сигнала
-дубликатов min=0.633/p50=0.751 → theta_reinforce=0.70, theta_link=0.58
-(ложные склейки исключены конструктивно; пара на грани уходит в безопасный LINK).
+Calibration distributions (the basis of the MiniLM threshold profile):
+the null "fact—nearest neighbor" p50=0.478/p95=0.578/max=0.653 against the
+duplicate signal min=0.633/p50=0.751 → theta_reinforce=0.70, theta_link=0.58
+(false merges excluded constructively; a borderline pair degrades to a safe
+LINK). Mean-centering did not help; multilingual-e5-large also failed to
+separate this corpus (noise p95=0.798 vs target p50=0.856) at ~20× cost —
+a negative result we record.
 
-Тесты: **116 passed** (unit-контракты всех модулей + сквозные сценарии:
-гейт новизны, суперсед, воздержание, положительный/отрицательный feedback,
-забывание, ассоциативный multi-hop после сна, save/reload идентичность,
-изоляция namespace и скоупов, контроль идентичности эмбеддера и геометрии,
-мультипроцессная целостность состояния, миграция наследия v0.3, stdio-e2e MCP).
+Tests: **122 passed** (unit contracts of all modules + end-to-end scenarios:
+novelty gate, supersede, abstention, positive/negative feedback, forgetting,
+associative multi-hop after sleep, save/reload identity, namespace and scope
+isolation, embedder identity and geometry guards, multi-process state
+integrity, v0.3 legacy migration, stdio-e2e MCP, operational guarantees).
 
-## 8. Ограничения v0.4 (честно)
+## 8. Limitations of v0.4 (honestly)
 
-- Эмбеддер по умолчанию — feature-hashing (лексическое сходство, без семантики).
-  Пол коллизий на несвязных текстах ~0.12 при dim=2048 — параметр `cos_min_recall`
-  калибруется под эмбеддер. Боевой эмбеддер подключается контрактом
-  `EmbeddingProvider` без изменений ядра.
-- Анизотропия MiniLM на однородных корпусах ограничивает абсолютное воздержание:
-  шум с top1-cos выше `cos_min_strong_recall` (≈30% шума в bench_real) проходит.
-  Правило плоского шума снимает часть, полная ликвидация потребует
-  контрастивного retrieval-эмбеддера (проверен multilingual-e5-large — не
-  разделяет этот корпус лучше при 20× цене, см. §7.2 примечания в репозитории).
-- Ассоциативные связи всплывают в recall только после первой консолидации;
-  CSR-кэш рёбер обновляется по версии `edges_rev` — чужие консолидации видны
-  на следующем recall, отставание кэша внутри одного «сна» допустимо.
-- Автодетект противоречий — фаза 2 (сейчас — явный `update_fact`).
-- Производительность L1 — Python dict/deque; при 10⁶+ следов — перевод горячего
-  пути в numpy/CUDA (фаза 3). Текущие цифры уже интерактивны (p95 < 5 мс @ 5k
-  синтетики; ~70 мс реального текста — домина эмбеддера).
-- FTS5 недоступен в экзотических сборках SQLite → ядро работает, keyword-канал
-  отключается (`fts_enabled=False`).
+- The default embedder is feature-hashing (lexical similarity, no semantics).
+  The collision floor on unrelated texts is ~0.12 at dim=2048 —
+  `cos_min_recall` is calibrated per embedder. A production embedder plugs in
+  through the `EmbeddingProvider` contract without core changes.
+- MiniLM anisotropy on homogeneous corpora caps absolute abstention: noise with
+  top-1 cosine above `cos_min_strong_recall` (~30% of bench_real noise) passes.
+  The flat-noise rule removes part of it; full elimination requires a
+  contrastive retrieval embedder (multilingual-e5-large tested — does not
+  separate this corpus better at ~20× cost).
+- Associative links surface in recall only after the first consolidation; the
+  edge CSR cache refreshes by `edges_rev` versioning — other processes'
+  consolidations become visible at the next recall, within-sleep staleness is
+  acceptable.
+- Automatic contradiction detection — phase 2 (currently explicit `update_fact`).
+- L1 performance is Python dict/deque; at 10⁶+ traces the hot path moves to
+  numpy/CUDA (phase 3). Current numbers are already interactive (p95 < 5 ms @ 5k
+  synthetic; ~70 ms real text — dominated by the embedder).
+- FTS5 missing in exotic SQLite builds → the core works, the keyword channel
+  disables itself (`fts_enabled=False`).

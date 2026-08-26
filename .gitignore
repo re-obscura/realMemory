@@ -26,3 +26,6 @@ rm_data/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# Agent session artifacts
+.zcode/

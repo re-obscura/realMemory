@@ -1,100 +1,101 @@
-# Исследовательский фундамент realMemory
+# realMemory Research Foundations
 
-Сводка исследования (август 2026), на которой основана архитектура. Каждое
-утверждение снабжено источником. Метод: OpenAlex / Crossref / arXiv API /
-первоисточники; поисковики частично блокировались, поэтому всё проверено по
-первичным URL.
+A research summary (August 2026) the architecture is based on. Every claim
+carries a source. Method: OpenAlex / Crossref / arXiv API / primary sources;
+search engines were partially blocked, so everything was verified against
+primary URLs.
 
-## 1. Ниша незанята
+## 1. The niche is unoccupied
 
-Не существует опубликованной системы, где пластичная SNN/ассоциативная сеть
-работает персистентной памятью-сайдкаром к неизменённому трансформеру.
-Всё направление SNN×LLM — про замену самой LLM спайковой версией ради энергии:
+There is no published system where a plastic SNN/associative network acts as a
+persistent memory sidecar to an unmodified transformer. The whole SNN×LLM
+direction is about replacing the LLM itself with a spiking version for energy:
 [SpikeGPT](https://arxiv.org/abs/2302.13939),
 [SpikingBERT](https://arxiv.org/abs/2308.10873),
 [SpikeLLM](https://arxiv.org/abs/2407.04752),
 [NSLLM, NSR 2025](https://doi.org/10.1093/nsr/nwaf551).
-Ближайшие «правильные» соседи, но без спайков:
-[HeLa-Mem, ACL 2026](https://doi.org/10.18653/v1/2026.acl-long.625) (хеббовская
-ассоциативная память агента) и
-[SpikeHD](https://doi.org/10.1038/s41598-022-11073-3) (SNN + гиперразмерная память).
+The nearest "proper" neighbors, without spikes:
+[HeLa-Mem, ACL 2026](https://doi.org/10.18653/v1/2026.acl-long.625) (Hebbian
+associative memory for agents) and
+[SpikeHD](https://doi.org/10.1038/s41598-022-11073-3) (SNN + hyperdimensional memory).
 
-## 2. Параметрическая память в веса LLM не масштабируется
+## 2. Parametric memory in LLM weights does not scale
 
-Правка моделей (ROME/MEMIT) работает для единичных правок и деградирует в
-двухфазное катастрофическое забывание при масштабе:
-[Model Editing at Scale](https://arxiv.org/abs/2401.07453). Единственное, что
-работает непрерывно без забывания — отдельные мутируемые структуры рядом с
-замороженными весами: латентные пулы ([MemoryLLM](https://arxiv.org/abs/2402.04624)
-— ~1M обновлений без деградации; [M+](https://arxiv.org/abs/2502.00592)),
+Model editing (ROME/MEMIT) works for single edits and degrades into two-phase
+catastrophic forgetting at scale:
+[Model Editing at Scale](https://arxiv.org/abs/2401.07453). The only things
+that work continuously without forgetting are separate mutable structures next
+to frozen weights: latent pools ([MemoryLLM](https://arxiv.org/abs/2402.04624)
+— ~1M updates without degradation; [M+](https://arxiv.org/abs/2502.00592)),
 fast weights ([Titans](https://arxiv.org/abs/2501.00663),
 [TTT layers](https://arxiv.org/abs/2407.04620),
-[MIRAS](https://arxiv.org/abs/2504.13173)), внешние графы.
+[MIRAS](https://arxiv.org/abs/2504.13173)), external graphs.
 
-## 3. Ландшафт конкурентов 2024–2026 и нерешённые оси
+## 3. The 2024–2026 competitor landscape and unsolved axes
 
 - [MemGPT/Letta](https://arxiv.org/abs/2310.08560),
-  [sleep-time compute](https://arxiv.org/abs/2504.13171) — офлайн-консолидация
-  снижает test-time compute ~5×;
-- [Mem0](https://arxiv.org/abs/2504.19413) — экстракция/консолидация онлайн;
-- [Zep/Graphiti](https://arxiv.org/abs/2501.13956) — би-темпоральный граф знаний;
+  [sleep-time compute](https://arxiv.org/abs/2504.13171) — offline consolidation
+  cuts test-time compute ~5×;
+- [Mem0](https://arxiv.org/abs/2504.19413) — online extraction/consolidation;
+- [Zep/Graphiti](https://arxiv.org/abs/2501.13956) — bi-temporal knowledge graph;
 - [HippoRAG 2](https://arxiv.org/abs/2502.14802) — Personalized PageRank,
-  «non-parametric continual learning»;
-- [A-MEM](https://arxiv.org/abs/2502.12110) — эволюция заметок по Цеттель;
-- [MemoryBank](https://arxiv.org/abs/2305.10250) — единственная явная кривая
-  забывания (аппроксимация Эббингауза формулой).
+  "non-parametric continual learning";
+- [A-MEM](https://arxiv.org/abs/2502.12110) — Zettel-style note evolution;
+- [MemoryBank](https://arxiv.org/abs/2305.10250) — the only explicit forgetting
+  curve (an Ebbinghaus approximation formula).
 
-Признанные всеми нерешённые оси: разрешение противоречий (OpenAI публично
-признавала противоречивые воспоминания в своей справке), принципиальная политика
-забывания, временная логика, тайминг консолидации, adversarial-устойчивость
-(вопросы о несказанном). Бенчмарки факт-реколла насыщаются
-([LoCoMo](https://arxiv.org/abs/2402.17753) >94%), живая ось — knowledge update
-и abstention из [LongMemEval](https://arxiv.org/abs/2410.10813).
+Axes everyone acknowledges as unsolved: contradiction resolution (OpenAI
+publicly admitted contradictory memories in its help center), a principled
+forgetting policy, temporal logic, consolidation timing, adversarial robustness
+(questions about the unsaid). Fact-recall benchmarks are saturating
+([LoCoMo](https://arxiv.org/abs/2402.17753) >94%); the live axes are knowledge
+update and abstention from [LongMemEval](https://arxiv.org/abs/2410.10813).
 
-Вывод: четыре операции, нативные для спайковой динамики (novelty-gated запись,
-eligibility-затухание, ассоциативное достраивание, replay-консолидация) — ровно
-центр нерешённого. Это позиционирование realMemory.
+Conclusion: four operations native to spiking dynamics (novelty-gated writes,
+eligibility decay, associative completion, replay consolidation) are exactly
+the center of the unsolved set. This is realMemory's positioning.
 
-## 4. Научные основания выбранных механизмов
+## 4. Scientific foundations of the chosen mechanisms
 
-- **Двуххранилищная консолидация**: pattern separation (DG) → completion (CA3)
-  → replay во сне → семантизация. [Rolls 2013](https://doi.org/10.3389/fnsys.2013.00074),
+- **Two-store consolidation**: pattern separation (DG) → completion (CA3)
+  → replay during sleep → semantization. [Rolls 2013](https://doi.org/10.3389/fnsys.2013.00074),
   [Buzsáki 2015](https://doi.org/10.1002/hipo.22488),
   [Rasch & Born 2013](https://doi.org/10.1152/physrev.00032.2012).
-- **BCPNN и palimpsest**: инкрементальное байесовско-хеббовское правило со
-  свойством мягкой перезаписи без катастрофы —
+- **BCPNN and palimpsest**: incremental Bayesian-Hebbian rule with soft
+  overwrite without catastrophe —
   [Sandberg et al. 2002](https://doi.org/10.1016/s0925-2312(00)00270-8);
-  spike-версия — [Tully et al. 2016](https://doi.org/10.1371/journal.pcbi.1004954);
-  семантика «эпизод→семантика» при повторных экспозициях —
+  spiking version — [Tully et al. 2016](https://doi.org/10.1371/journal.pcbi.1004954);
+  episode→semantic semantics under repeated exposures —
   [Chrysanthidis et al. 2022](https://doi.org/10.1523/ENEURO.0062-22.2022).
-- **Третий фактор / eligibility traces**:
+- **Third factor / eligibility traces**:
   [Frémaux & Gerstner 2016](https://doi.org/10.3389/fncir.2015.00085),
   [Gerstner et al. 2018](https://doi.org/10.3389/fncir.2018.00053),
   [e-prop](https://doi.org/10.1038/s41467-020-17236-y).
-- **Ассоциативная память на спайках** (теоретическая база L1/L2):
+- **Associative memory on spikes** (theoretical basis of L1/L2):
   [Gerstner & van Hemmen 1992](https://doi.org/10.1088/0954-898X_3_2_004);
-  WTA через латеральное торможение —
+  WTA via lateral inhibition —
   [Eliasmith 2005](https://doi.org/10.1162/0899766053630332).
-- **SDM и ёмкость**: [Kanerva 1988](https://doi.org/10.1109/18.32123);
+- **SDM and capacity**: [Kanerva 1988](https://doi.org/10.1109/18.32123);
   Hopfield ≡ attention — [Ramsauer et al. 2020](https://arxiv.org/abs/2008.02217).
-- **Кодирование**: сравнение rate/TTFS/population кодов —
+- **Coding**: comparison of rate/TTFS/population codes —
   [Guo et al. 2021](https://doi.org/10.3389/fnins.2021.638474).
 
-## 5. Честный скепсис, принятый в дизайне
+## 5. Honest skepticism accepted in the design
 
-- Ёмкость определяется байтами, а не спайками; SNN-хранилище **не** выигрывает
-  у векторной БД по ёмкости. Поэтому retrieval-реранк остаётся точным косинусом,
-  а ценность ядра — политики записи/забывания/консолидации как единая динамика.
-- Симуляция пластичной сети на GPU медленнее dense-matmul; энергетический
-  выигрыш существует только на нейроморфном кремнии
-  ([бенчмаркинг нейроморфного железа](https://doi.org/10.3389/fnins.2022.873935)).
-  Целевой масштаб v0–v1 — личная память (10⁴–10⁶ следов), где это несущественно.
-- Kill-criteria: если на осях update/contradiction/adversarial ядро не обгоняет
-  «точный поиск + decay-эвристики», SNN-слой демотируется до write-пути,
-  отрицательный результат документируется здесь.
+- Capacity is determined by bytes, not spikes; an SNN store does **not** beat a
+  vector database on capacity. That is why the retrieval rerank remains exact
+  cosine, and the core's value is write/forget/consolidation policies as one
+  dynamics.
+- Simulating a plastic network on GPU is slower than dense matmul; the energy
+  win exists only on neuromorphic silicon
+  ([neuromorphic hardware benchmarking](https://doi.org/10.3389/fnins.2022.873935)).
+  The v0–v1 target scale is personal memory (10⁴–10⁶ traces), where this is moot.
+- Kill criteria: if on the update/contradiction/adversarial axes the core does
+  not beat "exact search + decay heuristics", the SNN layer is demoted to the
+  write path and the negative result is documented here.
 
-## 6. Железо (справочно)
+## 6. Hardware (reference)
 
-Loihi 2 — research-only (INRC); Hala Point (2024): 1.15B нейронов, 128B синапсов,
-2.6 кВт; BrainChip Akida AKD1000 — dev-kit $499, 1.2M нейронов, on-chip learning.
-Порт — опциональная фаза 4, не зависимость плана.
+Loihi 2 — research-only (INRC); Hala Point (2024): 1.15B neurons, 128B synapses,
+2.6 kW; BrainChip Akida AKD1000 — dev-kit $499, 1.2M neurons, on-chip learning.
+Porting is an optional phase 4, not a plan dependency.
