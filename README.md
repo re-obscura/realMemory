@@ -179,6 +179,13 @@ Real-text benchmark (`bench_real`, fastembed MiniLM dim=384, 103 RU/EN facts,
 Lesson from the synthetic benchmark: it scored 1.000 while default thresholds
 on real text merged almost everything into a few blobs — the calibration is now
 derived from benchmark distributions and lives in the embedder profile.
+The same real-text benchmark includes a naive full-scan cosine baseline:
+the pipeline wins clearly on exact tokens (1.000 vs 0.800), is on par on
+paraphrases, and currently abstains less aggressively than a pure threshold —
+see [`docs/ARCHITECTURE.md` §7.2](docs/ARCHITECTURE.md).
+Scale sweep (10k–50k traces) with honest findings about a recall-quality cliff
+at 30k on synthetic data: [§7.3](docs/ARCHITECTURE.md).
+
 Details and the negative Hamming-SDM result in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §3 and §7.
 

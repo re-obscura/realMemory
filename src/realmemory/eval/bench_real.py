@@ -94,6 +94,7 @@ def _run(
     lats: list[float] = []
     sources: dict[str, int] = {}
     by_type: dict[str, dict[str, float]] = {}
+    naive_by_type: dict[str, dict[str, float]] = {}
     rows_by_type: dict[str, list[dict]] = {}
 
     for q in queries:
@@ -112,15 +113,35 @@ def _run(
             (it.cosine for it in packet.items if it.source == "direct"), reverse=True,
         )
 
+        # наивный baseline: чистый косинус по всем фактам без гейта/decay/L1,
+        # воздержание по фиксированному порогу (тот же cos_min_strong_recall)
+        if expect_idx is not None:
+            order = np.argsort(-row_sims)[:k]
+            naive_rank = (
+                int(np.where(order == expect_idx)[0][0]) + 1
+                if expect_idx in order else None
+            )
+        else:
+            naive_rank = None
+
         bucket = by_type.setdefault(qtype, {"total": 0.0, "hits": 0.0, "mrr": 0.0})
+        naive_bucket = naive_by_type.setdefault(
+            qtype, {"total": 0.0, "hits": 0.0, "mrr": 0.0},
+        )
         bucket["total"] += 1
+        naive_bucket["total"] += 1
         rank = None
         if qtype == "noise":
+            naive_hit = float(row_sims.max()) < cfg.cos_min_strong_recall
+            naive_bucket["hits"] += int(naive_hit)
             bucket["hits"] += int(packet.abstained)
             rows_by_type.setdefault(qtype, []).append({"q": q["q"], "item_cos": item_cos})
         else:
             assert expect_idx is not None  # noise отсмотрен выше
             target_id = ids[expect_idx]
+            if naive_rank is not None and naive_rank <= k:
+                naive_bucket["hits"] += 1
+                naive_bucket["mrr"] += 1.0 / naive_rank
             rank = next(
                 (i + 1 for i, it in enumerate(packet.items) if it.memory_id == target_id),
                 None,
@@ -131,6 +152,7 @@ def _run(
             rows_by_type.setdefault(qtype, []).append({
                 "q": q["q"], "rank": rank, "cos_target": target_cos,
                 "fact": facts[expect_idx], "item_cos": item_cos,
+                "naive_rank": naive_rank,
             })
         for it in packet.items:
             sources[it.source] = sources.get(it.source, 0) + 1
@@ -167,6 +189,7 @@ def _run(
             "cos_min_recall": cfg.cos_min_recall,
         },
         "by_type": {},
+        "naive_baseline": {},
         "calibration": {
             "nn_fact_sim": _dist(nn_sims),
             "query_max_cos": {},
@@ -191,6 +214,15 @@ def _run(
             "hit_rate": round(b["hits"] / n, 4),
             "mrr": round(b["mrr"] / n, 4),
         }
+        nb = naive_by_type.get(qtype)
+        if nb:
+            nn = max(1.0, nb["total"])
+            report["naive_baseline"][qtype] = {
+                "total": int(nb["total"]),
+                "hits": int(nb["hits"]),
+                "hit_rate": round(nb["hits"] / nn, 4),
+                "mrr": round(nb["mrr"] / nn, 4),
+            }
     report["_rows"] = rows_by_type
     return report
 
@@ -253,15 +285,23 @@ def main(argv=None) -> int:
           f"{report['latency_p50_ms']} / {report['latency_p95_ms']} мс")
     labels = {"paraphrase": "переформулировки", "token": "точные токены",
               "noise": "шум (воздержание)"}
+    print("pipeline vs наивный baseline (чистый косинус, порог воздержания):")
     for qtype in ("paraphrase", "token", "noise"):
         b = report["by_type"].get(qtype)
         if not b:
             continue
+        nb = report["naive_baseline"].get(qtype)
         if qtype == "noise":
-            print(f"{labels[qtype]:<22} {b['hit_rate']:.3f} ({b['hits']}/{b['total']})")
+            print(f"{labels[qtype]:<22} pipeline {b['hit_rate']:.3f} "
+                  f"({b['hits']}/{b['total']})   naive {nb['hit_rate']:.3f}"
+                  if nb else
+                  f"{labels[qtype]:<22} pipeline {b['hit_rate']:.3f} "
+                  f"({b['hits']}/{b['total']})")
         else:
-            print(f"{labels[qtype]:<22} hits@{args.k}: {b['hit_rate']:.3f}   "
-                  f"MRR: {b['mrr']:.3f}")
+            naive_part = (f"   naive hits@{args.k}: {nb['hit_rate']:.3f}, MRR {nb['mrr']:.3f}"
+                          if nb else "")
+            print(f"{labels[qtype]:<22} pipeline hits@{args.k}: {b['hit_rate']:.3f}, "
+                  f"MRR {b['mrr']:.3f}{naive_part}")
     print(f"источники выдачи: {report['sources']}")
     base_total = sum(report["gate_base"].values())
     print(f"гейт на записи: база {report['gate_base']} из {base_total}; "

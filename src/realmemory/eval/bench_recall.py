@@ -73,10 +73,14 @@ def _bench_config(n_facts: int) -> MemoryConfig:
     bucket_cap относительно этой нагрузки. Для 1500 фактов: 1500*96/2048 ≈ 70
     на бакет при cap 512 — вытеснения нет; dim=1024+ держит коллизионный пол
     hashing-эмбеддера ниже cos_min_recall (условие честного abstention).
+    Для крупных корпусов ёмкостные параметры обязаны расти вместе с базой
+    (иначе начинается осмысленное вытеснение-забывание): при ≥10k фактов
+    n_units=16384 держит нагрузку ≤300 на бакет на 50k.
     """
+    n_units = 16384 if int(n_facts) > 5000 else 2048
     return MemoryConfig(
         dim=2048,
-        n_units=2048,
+        n_units=n_units,
         k_sparse=96,
         bucket_cap=512,
         # порог воздержания — в середине зазора между полом коллизий эмбеддера
@@ -142,6 +146,14 @@ def run(
         n_noise = max(20, n_queries // 5)
 
         lat = np.asarray(latencies)
+
+        # восстановление состояния: время пересборки производных структур
+        # (L1-бакеты, юнит-индекс, CSR рёбер) при открытии базы
+        hippo.close()
+        t_open = time.perf_counter()
+        hippo = Hippocampus.open(tmp / "rm", config=cfg)
+        reopen_ms = (time.perf_counter() - t_open) * 1000.0
+
         hits_pipe = round(pipe_hits / len(query_idx), 4)
         hits_base = round(base_hits / len(query_idx), 4)
         abstain_rate = round(abstained / n_noise, 4)
@@ -155,6 +167,7 @@ def run(
             "recall_p95_ms": round(float(np.percentile(lat, 95)), 3),
             "writes_per_sec": round(len(ids) / max(write_s, 1e-9), 1),
             "mean_top1_confidence": round(float(np.mean(confidences)) if confidences else 0.0, 4),
+            "reopen_rebuild_ms": round(reopen_ms, 1),
         }
         ok = hits_pipe >= hits_base - 0.02 and abstain_rate >= 0.9
         metrics["phase0_gate"] = "PASS" if ok else "FAIL"
@@ -177,6 +190,7 @@ def _print_table(m: dict, k: int) -> None:
         ("baseline noise top-1 cos", m["baseline_noise_top1_cos_mean"]),
         ("recall latency p50/p95 ms", f"{m['recall_p50_ms']} / {m['recall_p95_ms']}"),
         ("writes/sec", m["writes_per_sec"]),
+        ("reopen rebuild ms", m["reopen_rebuild_ms"]),
         ("mean top-1 confidence", m["mean_top1_confidence"]),
     ]
     for name, val in rows:

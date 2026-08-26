@@ -28,6 +28,14 @@ Non-goals for v1: multi-tenant SaaS, RAG over large corpora, fine-tuning LLM wei
 | Sharp-wave replay ("sleep") | Offline consolidator: trace commit, decay, promotion |
 | Neuromodulation (dopamine) | Third factor: `feedback()` amplifies fresh eligibility events |
 
+**What the metaphor is and is not.** The *dynamics* are borrowed from
+computational neuroscience — novelty-gated writes, eligibility traces with a
+third factor, replay-style consolidation (sources in
+[RESEARCH.md §4](RESEARCH.md)). There are no capacity or energy claims: an
+SNN-style store does **not** beat a vector database on either, and explicit
+kill criteria demote the plastic layer if it ever loses to plain retrieval
+heuristics ([RESEARCH.md §5](RESEARCH.md)).
+
 ## 3. Core levels
 
 ### L1 — SDRVotingIndex (voting addressing)
@@ -228,6 +236,40 @@ embedder. Config: dim=2048, n_units=2048, k=96, bucket_cap=512, cos_min=0.18.
 
 Phase-0 gate (pipeline ≥ baseline−0.02 and abstention ≥ 0.9): **PASS** at both scales.
 
+### 7.3 Scale sweep (bench_recall, same synthetic setup)
+
+Capacity parameters scaled with the corpus (n_units=16384 beyond 5k facts —
+otherwise palimpsest eviction starts, which is forgetting-by-design, not a bug).
+
+| Corpus | pipeline hits@10 | abstention | recall p50/p95, ms | writes/sec | reopen rebuild, s |
+|---|---|---|---|---|---|
+| 1 500 | 1.000 | 1.00 | 2.5 / 3.1 | 419 | — |
+| 10 000 | 0.99 | 1.00 | 10.7 / 12.6 | 95 | 1.9 |
+| 30 000 | 0.87 | 1.00 | 15.6 / 16.6 | 76 | 7.8 |
+| 50 000 | 0.94 | 1.00 | 21.1 / 23.1 | 63 | 16.6 |
+
+Honest findings:
+
+- Latency, throughput and reopen-rebuild scale gracefully to 50k traces;
+  rebuild is roughly linear in corpus size.
+- A **quality cliff appears between 10k and 30k** with this setup (phase-0 gate
+  FAIL). Measured so far: L1 candidate inclusion at 30k is 97% (the target is
+  in the voted candidate set almost always), and raising the candidate budget
+  ×16 does **not** recover hits — so the loss sits in the post-fetch
+  ranking/filtering stage, coinciding with the growing density of hashing-
+  embedding collisions at larger corpora. Instrumented diagnosis and a fix are
+  a phase-1 issue; until then, tens of thousands of traces on the *synthetic*
+  setup are outside the proven envelope. Note this benchmark measures mechanics
+  with a hashing embedder whose collision floor (~0.12–0.15) itself rises with
+  corpus size — a production semantic embedder behaves differently.
+- Non-monotonicity between 30k and 50k (0.87 vs 0.94) is within sampling noise
+  of 100 queries plus eviction randomness; both fail the bar.
+
+A quantitative comparison against LLM-backed memory services (mem0/Zep/Letta)
+is deliberately deferred until after dogfooding: they sit on a different axis
+(API call per write, non-deterministic) and a fair harness needs both quality
+and cost/latency columns.
+
 ### 7.2 Real text (bench_real: fastembed MiniLM dim=384, RU/EN)
 
 103 facts from adjacent domains, 54 paraphrase queries, 15 exact-token queries,
@@ -271,8 +313,14 @@ integrity, v0.3 legacy migration, stdio-e2e MCP, operational guarantees).
   consolidations become visible at the next recall, within-sleep staleness is
   acceptable.
 - Automatic contradiction detection — phase 2 (currently explicit `update_fact`).
-- L1 performance is Python dict/deque; at 10⁶+ traces the hot path moves to
-  numpy/CUDA (phase 3). Current numbers are already interactive (p95 < 5 ms @ 5k
-  synthetic; ~70 ms real text — dominated by the embedder).
+- L1 performance is Python dict/deque: graceful to 50k traces on latency and
+  rebuild (§7.3), but a recall-quality cliff appears between 10k and 30k on the
+  synthetic setup (post-fetch stage under hashing-collision density; open
+  phase-1 issue). Beyond 10⁵–10⁶ traces the hot path moves to numpy/CUDA
+  (phase 3).
+- No quantitative comparison against LLM-backed memory services yet
+  (mem0/Zep/Letta): different trade-off axis — local, deterministic, zero-cost
+  writes vs richer semantics through LLM extraction. A quality+cost harness is
+  planned after the dogfooding period.
 - FTS5 missing in exotic SQLite builds → the core works, the keyword channel
   disables itself (`fts_enabled=False`).
