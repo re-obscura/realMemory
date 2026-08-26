@@ -1,4 +1,4 @@
-# Контракты модулей realMemory v0.1
+# Контракты модулей realMemory v0.4
 
 Этот документ фиксирует публичные интерфейсы. Правило: изменения сигнатур
 публичных API требуют правки этого файла в том же коммите. Всё, что не описано
@@ -8,6 +8,7 @@
 - время — `float`, секунды epoch (UTC); все таймауты конфига — секунды;
 - эмбеддинги — `np.ndarray[float32]` формы `(dim,)`;
 - SDR — `np.ndarray[int32]`, отсортированные уникальные индексы on-битов;
+- скоупы — `scope: str`, `'global'` или имя проекта (`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`);
 - детерминизм: все случайные структуры параметризуются seed'ами из конфига;
   одинаковый конфиг + одинаковая последовательность вызовов → одинаковое состояние;
 - ошибки: невалидный вход → `ValueError`; отсутствующий id → `KeyError`;
@@ -20,6 +21,11 @@
 ```python
 KIND_EPISODIC = "episodic"; KIND_SEMANTIC = "semantic"
 STATUS_ACTIVE = "active"; STATUS_SUPERSEDED = "superseded"
+SCOPE_GLOBAL = "global"
+
+SOURCE_DIRECT = "direct"        # семантика прошла cos_min_recall
+SOURCE_ASSOCIATED = "associated"# волна ассоциаций по рёбрам L2
+SOURCE_KEYWORD = "keyword"      # точный токен при косинусе ниже порога
 
 class DecisionAction(Enum): CREATE | REINFORCE | LINK
 
@@ -40,8 +46,9 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
     cosine: float                # [0..1], точная близость к запросу
     confidence: float            # композит (см. Hippocampus.recall)
     retention: float             # [0..1]
-    source: str                  # "direct" | "associated"
+    source: str                  # "direct" | "associated" | "keyword"
     created_at: float; updated_at: float; meta: dict
+    scope: str                   # скоуп следа
 
 @dataclass(frozen=True) RecallPacket:
     query: str; items: tuple[RecalledMemory, ...]
@@ -55,21 +62,24 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
     id, text, kind, status, meta,
     embedding, sdr,
     created_at, updated_at, reinforced_count, last_reinforced_at,
-    base_strength, valid_from, valid_to, superseded_by
+    base_strength, valid_from, valid_to, superseded_by,
+    scope = SCOPE_GLOBAL
 ```
 
-Инварианты: `0 ≤ cosine, confidence, retention ≤ 1`; `abstained == (len(items)==0)`;
-у суперседнутого следа `superseded_by != None` и `valid_to != None`.
+Инварианты: `0 ≤ cosine, confidence, retention ≤ 1`; abstained означает «нет
+надёжных воспоминаний» (пусто после фильтров либо сработало правило плоского
+шума — см. recall); у суперседнутого следа `superseded_by != None` и `valid_to != None`.
 
 ## config.py — `MemoryConfig`
 
 Единый dataclass всех гиперпараметров (см. докстринги полей). Ключевые группы:
 кодирование (`dim, n_units, k_sparse, sdr_seed`), L1 (`bucket_cap,
 recall_oversample`), гейт (`theta_reinforce ≥ theta_link > cos_min_recall`),
+воздержание (`cos_min_strong_recall ≥ cos_min_recall`, `abstain_spread_cos`),
 затухание (`tau_episodic < tau_semantic`, `min_retention_recall`,
 `initial_strength ≤ strength_cap`), связи (`tau_eligibility < tau_edge_stable`,
 `edge_min_weight`, `max_pairs_per_bind`), spread (`depth, alpha, top_m, eps`),
-ранжирование (`w_votes, assoc_confidence_penalty`).
+ранжирование (`w_votes, assoc_confidence_penalty, w_keyword`).
 
 Фабрики: `MemoryConfig.dev()` — малые размеры для тестов/демо;
 `MemoryConfig.production()` — целевые масштабы фазы 3.
@@ -102,7 +112,10 @@ class FastEmbedProvider(model_name=DEFAULT_MODEL, dim=None, cache_dir=None)
                                                     # локальный ONNX (extra [local]);
                                                     # кэш по умолчанию ~/.cache/realmemory/fastembed;
                                                     # e5-префиксы включаются только для e5-моделей;
-                                                    # name включает версию fastembed
+                                                    # name включает версию fastembed;
+                                                    # ClassVar recommended_thresholds —
+                                                    # профиль порогов под анизотропию модели,
+                                                    # применяется mcp_server.main() до открытия базы
 ```
 
 Контракт `embed`: пустой/blank текст → нулевой вектор; одинаковый текст →
@@ -215,35 +228,55 @@ def should_promote(kind, count, created_at, now, cfg) -> bool
 ## store.sqlite_store — MemoryStore
 
 ```python
-class MemoryStore(path, dim):                        # контекстный менеджер
+class MemoryStore(path, dim):                        # контекстный менеджер; WAL + busy_timeout;
+                                                     # мутации в BEGIN IMMEDIATE — безопасно
+                                                     # для нескольких процессов
+    # следы
     def insert(rec: MemoryRecord) -> int                     # присваивает id
     def get(id) -> MemoryRecord | None
     def get_many(ids) -> list[MemoryRecord]                  # порядок как в ids, отсутствующие пропущены
     def update_trace(id, base_strength, reinforced_count, last_reinforced_at, kind=None) -> None
     def adjust_base(id, base_strength, updated_at) -> None   # ослабление без сброса таймера
     def mark_superseded(id, by_id, when) -> None
-    def get_meta(key) -> str | None                          # таблица db_meta (key,value)
-    def set_meta(key, value) -> None                         # upsert
     def iter_active(batch=256) -> Iterator[MemoryRecord]
-    def count(status=None, kind=None) -> int
+    def count(status=None, kind=None, scope=None) -> int
+    def scope_counts() -> dict[str, int]                     # активные по скоупам
     def all_active_ids() -> np.ndarray[int64]
     def top_by_reinforcements(limit=10) -> list[MemoryRecord]   # для отчёта
     def stale_episodic(limit=10) -> list[MemoryRecord]          # кандидаты на забывание
+    # мета и счётчики (db_meta)
+    def get_meta(key) -> str | None / set_meta(key, value)
+    def bump_meta_int(key, delta=1) -> int                   # атомарный инкремент, новое значение
+    def consume_meta_int(key) -> int                         # прочитать и обнулить
+    # рёбра L2 (таблица edges: key=src*n_units+dst)
+    def edges_rev() -> int                                   # версия для инвалидации CSR-кэша
+    def edges_load() -> (keys int64, ws float32)             # отсортированы по key
+    def edges_apply(src, dst, w, now, tau, min_weight, stride) -> (committed, pruned)
+                                                             # распад от last_edge_tick + обрезка +
+                                                             # вливание батча + тик, одна транзакция
+    def edges_import(keys, ws, last_tick)                    # миграция legacy-снапшота без распада
+    def edges_stats(now, tau) -> (count, effective_total_weight)
+    # eligibility write-through (таблицы eligibility/elig_sources)
+    def elig_add(src, dst, strength, created_at, source_ids) -> None
+    def elig_reward(mem_ids, factor) -> int                  # strength *= factor по источникам
+    def elig_drain() -> list[event]                          # выкачать с удалением,
+                                                             # формат EligibilityLog.load_state_dict
+    def elig_pending() -> int
+    # журнал пластичности (таблица events)
+    def event_append(event_type, fields, ts) -> None
+    def event_count() -> int
+    def iter_events() -> Iterator[dict]                      # {"ts","type",**data} по seq
+    def gate_decisions() -> dict[str, int]                   # из write-событий по $.action
+    def recall_stats() -> (count, avg_latency_ms)
 class StorageError(Exception)
 ```
 
 Сериализация: embedding→float32 blob, sdr→int32 blob.
-`iter_active` не возвращает superseded.
-`db_meta['embedder']` — имя провайдера, создавшего векторы; Hippocampus
-отклоняет открытие с другим именем (RuntimeError).
-
-## store.journal — Journal
-
-```python
-class Journal(path):
-    def append(event_type: str, **fields) -> None    # одна JSON-строка + flush
-    def events() -> Iterator[dict]
-```
+`iter_active` не возвращает superseded. Базы до появления колонок мигрируют
+ALTER'ом при открытии (scope → default 'global').
+`db_meta['embedder']` — имя провайдера, создавшего векторы; `db_meta['config']`
+— геометрия (dim/n_units/sdr_seed); Hippocampus отклоняет несовместимое
+открытие (RuntimeError).
 
 ## hippocampus — Hippocampus (фасад)
 
@@ -257,17 +290,28 @@ class Hippocampus:
              verify_embedder: bool = True) -> "Hippocampus"
         # открывает или создаёт базу в каталоге path (path/namespace при namespace,
         # [A-Za-z0-9][A-Za-z0-9_.-]{0,63}, иначе ValueError);
-        # восстанавливает L1/L2 состояние; проверяет идентичность эмбеддера;
+        # перестраивает производные структуры (L1-бакеты, юнит-индекс, CSR рёбер);
+        # проверяет идентичность эмбеддера и геометрию конфига;
+        # однократно импортирует наследие v0.3 (journal.jsonl, snapshot.pkl);
         # verify_embedder=False — для инструментов без эмбеддингов (хуки),
         # проверка не выполняется и метка не перезаписывается
 
     def remember(self, text, *, kind=KIND_EPISODIC, meta=None, when=None,
-                 force_new=False, related_ids: Sequence[int] = ()) -> WriteResult
-        # ValueError на blank text и неизвестный kind; KeyError если id из related_ids
-        # не существует
+                 force_new=False, related_ids: Sequence[int] = (),
+                 scope: str = SCOPE_GLOBAL) -> WriteResult
+        # гейт сравнивает текст только со своим скоупом и global;
+        # ValueError на blank text, неизвестный kind, невалидный scope;
+        # KeyError если id из related_ids не существует
 
-    def recall(self, query, *, k=5, include_superseded=False) -> RecallPacket
-        # запрос кодируется embed_query(), когда эмбеддер его предоставляет
+    def recall(self, query, *, k=5, include_superseded=False,
+               scope: str | None = None, all_scopes: bool = False) -> RecallPacket
+        # запрос кодируется embed_query(), когда эмбеддер его предоставляет;
+        # scope='<проект>' — следы проекта + global; None/all_scopes — вся память;
+        # keyword-канал FTS5: полный матч всех токенов бустит confidence,
+        # частичный при cos < cos_min_recall возвращается как source='keyword';
+        # воздержание дополнительно срабатывает при «плоском шуме»: top1 direct
+        # < cos_min_strong_recall, разброс косинусов выдачи < abstain_spread_cos
+        # и нет полного keyword-матча
 
     def link_memories(self, ids: Sequence[int], strength=1.0) -> int
         # pairwise bind между SDR следов; KeyError на неизвестный id
@@ -279,50 +323,62 @@ class Hippocampus:
         # eligibility-событий; возвращает число затронутых следов
 
     def update_fact(self, old_id: int, new_text: str, meta=None) -> WriteResult
-        # force_new + mark_superseded(old→new); KeyError на old_id
+        # force_new + mark_superseded(old→new); новый след наследует scope старого
 
-    def consolidate(self, save=True) -> ConsolidationReport
-    def stats(self) -> dict
-    def save(self) -> None          # снапшот нейронного состояния
+    def consolidate() -> ConsolidationReport     # всё состояние уже в БД, сохранять нечего;
+                                                 # параллельные «сны» сериализуются транзакцией
+    def stats() -> dict                          # глобально из БД: одинаково для всех процессов
+    def metrics_snapshot(now=None) -> dict       # срез для dream_log/отчёта
+    def pending_eligibility -> int               # незакоммиченные bind'ы (общие для процессов)
 ```
 
 Формула уверенности recall (зафиксирована):
-`confidence = cosine · (w_votes + (1−w_votes)·votes_norm) · (0.3 + 0.7·retention)`,
-для associated-элементов дополнительно ×`assoc_confidence_penalty`, косинус
-заменяется полом 0.05 (связь сама является сигналом релевантности, поэтому
-косинусный фильтр к ассоциативной волне не применяется — только retention).
-Абстейн: нет кандидатов, прошедших фильтры direct-волны
-`cos ≥ cos_min_recall` и `retention ≥ min_retention_recall`.
-Ассоциативная волна использует только рёбра, закоммиченные консолидацией:
-связи до первого «сна» живут в eligibility-логе и в recall не участвуют.
+`confidence = cosine · (w_votes + (1−w_votes)·votes_norm) · (0.3 + 0.7·retention)`;
+для full keyword-match confidence поднимается максимум до
+`w_keyword · (0.3 + 0.7·retention)`; для associated-элементов дополнительно
+×`assoc_confidence_penalty`, косинус заменяется полом 0.05 (связь сама является
+сигналом релевантности, поэтому косинусный фильтр к ассоциативной волне не
+применяется — только retention).
+Абстейн: (а) нет кандидатов, прошедших фильтры direct-волны
+`cos ≥ cos_min_recall` и `retention ≥ min_retention_recall`; (б) правило
+плоского шума из докстринга recall.
 
 ## api.mcp_server
 
 ```python
-def build_server(hippo):                # ImportError("pip install 'realmemory[mcp]'") без пакета fastmcp
+def build_server(hippo, default_project=None):  # ImportError("pip install 'realmemory[mcp]'") без fastmcp
 def make_embedder(choice):              # "local" | "hashing" | "auto"
-def main(argv=None):                    # CLI: --path, --namespace, --embedder {auto,local,hashing}; stdio MCP
+def main(argv=None):                    # CLI: --path, --namespace, --project, --embedder; stdio MCP
+                                        # default_project = resolve_project(--project):
+                                        # явный аргумент > REALMEMORY_PROJECT >
+                                        # ZCODE_PROJECT_DIR/CLAUDE_PROJECT_DIR > cwd c .git/.zcode
 ```
 
 Тулы (имена — когнитивные действия, описания на английском):
-`recall(query, k, include_superseded)` · `memorize(text, kind, related_ids)` ·
+`recall(query, k, include_superseded, project)` ·
+`memorize(text, kind, related_ids, project)` ·
 `reflect(memory_ids, reward)` → `{touched}` · `revise(old_id, new_text)` ·
-`introspect()` · `dream_log()` — тонкие обёртки над фасадом,
-JSON-сериализация пакетов; recall отдаёт items с `meta` и датами.
+`introspect()` (включает текущий проект и разбивку по скоупам) · `dream_log()` —
+тонкие обёртки над фасадом, JSON-сериализация пакетов.
+Политика скоупов в описаниях тулов: факты о рабочем проекте — с project=<имя>,
+пользовательские предпочтения/идентичность — без project → global.
 
 ## hook_cli (автоматизация для агентов)
 
 ```python
 # python -m realmemory.hook_cli <cmd> --path P [--namespace NS]
-brief  [--top N] [--plain]      # SessionStart: strict JSON
+brief  [--project P] [--top N] [--episodic-top M] [--plain]
+                                # SessionStart: strict JSON
                                 # {"hookSpecificOutput":{"hookEventName":
                                 #  "SessionStart","additionalContext":str}};
-                                # конфиг читается из snapshot.pkl, модель НЕ грузится;
-                                # additionalContext на английском: объёмы + подсказка тулов
-sleep  [--min-interval-s 1800] [--verbose]
-                                # Stop: consolidate(save=True) c троттлингом —
-                                # пропуск если <min-interval-s и db не новее снапшота;
-                                # вывод пустой, код возврата всегда 0
+                                # семантические факты (•) затем прочные эпизоды (·),
+                                # score эпизода = retention·(1+ln(1+подкреплений));
+                                # фильтр по скоупу проекта+global, бюджет ~600 символов;
+                                # конфиг читается из db_meta, модель НЕ грузится
+sleep  [--verbose]
+                                # Stop: consolidate(); троттлинг по состоянию базы —
+                                # пропуск если нет записей после last_consolidate_at
+                                # и пуст eligibility; вывод пустой, код возврата всегда 0
 ```
 
 ## report (python -m realmemory.report)
@@ -340,14 +396,19 @@ def main(argv=None)                # CLI: --path, --namespace, --json out.json
 `{latency_ms, items, abstained, top_conf}`; каждый consolidate — полный
 `metrics`-срез (`Hippocampus.metrics_snapshot()`).
 
-## eval.bench_recall
+## eval.bench_recall / eval.bench_real
 
 ```python
+# bench_recall: синтетика, hashing-эмбеддер
 def run(n_facts=1500, n_queries=200, seed=0, config=None) -> dict  # метрики (см. вывод)
-if __name__ == "__main__": argparse CLI
+
+# bench_real: fixtures/bench_real.json, fastembed обязателен
+# python -m realmemory.eval.bench_real [--k 10] [--verbose] [--json out.json]
 ```
 
-Метрики-контракт: `pipeline_hits@k`, `baseline_hits@k` (точный косинус тем же
-эмбеддером), латентности p50/p95 recall, writes/sec, abstention на noise-запросах.
-Успех фазы 0: pipeline ≥ baseline − ε на статическом recall и abstention ≥ 90%
-на noise.
+Метрики-контракт bench_recall: `pipeline_hits@k`, `baseline_hits@k` (точный
+косинус тем же эмбеддером), латентности p50/p95, writes/sec, abstention на noise.
+Метрики bench_real: hits@10/MRR раздельно для переформулировок и точных токенов,
+воздержание на шуме, гейт раздельно для базы и дубликатов-переформулировок,
+калибровочные распределения (нуль «факт—сосед» без дупл., сигнал дубликатов,
+max-cos запросов). Ссылки в фикстуре — по строковым id фактов.
