@@ -22,10 +22,11 @@ class MemoryConfig:
     theta_reinforce: float = 0.45
     theta_link: float = 0.22
     cos_min_recall: float = 0.12
-    # воздержание: top1 ниже сильного порога при плоском разбросе выдачи
-    # (нет выраженного лидера) — надёжных воспоминаний нет;
-    # полный keyword-матч отменяет правило (точный токен надёжен сам по себе)
-    cos_min_strong_recall: float = 0.35
+    # воздержание «плоский шум» — opt-in эвристика для анизотропных семантических
+    # эмбеддеров (профиль fastembed включает её значениями ниже). Дефолт 0 = выключено:
+    # абсолютные пороги не переносятся между эмбеддерами/размерностями
+    # (на hashing dim=2048 вся шкала ниже — правило ложно съедало корректные ответы).
+    cos_min_strong_recall: float = 0.0
     abstain_spread_cos: float = 0.20
 
     # -- следы и затухание (секунды) -----------------------------------------
@@ -65,8 +66,12 @@ class MemoryConfig:
             raise ValueError("требуется 0 < k_sparse <= n_units")
         if not self.theta_reinforce > self.theta_link > self.cos_min_recall >= 0.0:
             raise ValueError("требуется theta_reinforce > theta_link > cos_min_recall >= 0")
-        if self.cos_min_strong_recall < self.cos_min_recall:
-            raise ValueError("cos_min_strong_recall должен быть >= cos_min_recall")
+        # 0 означает «правило плоского шума выключено»; иначе порог обязан
+        # быть не ниже косинусного пола
+        if self.cos_min_strong_recall != 0 and self.cos_min_strong_recall < self.cos_min_recall:
+            raise ValueError(
+                "cos_min_strong_recall должен быть 0 (выключено) или >= cos_min_recall"
+            )
         if self.abstain_spread_cos <= 0:
             raise ValueError("abstain_spread_cos должен быть положительным")
         if self.bucket_cap <= 0:

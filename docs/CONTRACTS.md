@@ -317,11 +317,14 @@ class Hippocampus:
                scope: str | None = None, all_scopes: bool = False) -> RecallPacket
         # the query is encoded with embed_query() when the embedder provides it;
         # scope='<project>' — traces of the project + global; None/all_scopes — everything;
+        # L1 candidate budget is adaptive: floor = traces/64 (cap 1500), because
+        # vote noise grows with corpus size;
         # FTS5 keyword channel: full token match boosts confidence,
         # partial match below the cosine floor comes back as source='keyword';
-        # abstention additionally fires on "flat noise": top-1 direct
-        # < cos_min_strong_recall, cosine spread of the direct wave
-        # < abstain_spread_cos and no full keyword match
+        # abstention additionally fires on "flat noise" (opt-in via the embedder
+        # profile, cos_min_strong_recall > 0): top-1 direct below the floor,
+        # cosine spread of the direct wave < abstain_spread_cos and no full
+        # keyword match
 
     def link_memories(self, ids: Sequence[int], strength=1.0) -> int
         # pairwise bind between trace SDRs; KeyError on unknown id

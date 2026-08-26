@@ -244,26 +244,37 @@ otherwise palimpsest eviction starts, which is forgetting-by-design, not a bug).
 | Corpus | pipeline hits@10 | abstention | recall p50/p95, ms | writes/sec | reopen rebuild, s |
 |---|---|---|---|---|---|
 | 1 500 | 1.000 | 1.00 | 2.5 / 3.1 | 419 | — |
-| 10 000 | 0.99 | 1.00 | 10.7 / 12.6 | 95 | 1.9 |
-| 30 000 | 0.87 | 1.00 | 15.6 / 16.6 | 76 | 7.8 |
-| 50 000 | 0.94 | 1.00 | 21.1 / 23.1 | 63 | 16.6 |
+| 10 000 | 0.99 | 1.00 | 13.2 / 13.9 | 97 | 1.8 |
+| 30 000 | 0.91 | 0.95 | 25.9 / 27.4 | 69 | 7.5 |
+| 50 000 | 0.94 | 0.95 | 37.4 / 40.2 | 58 | 14.2 |
+
+Current state includes two mitigations: the flat-noise heuristic is opt-in
+(see below) and the L1 candidate budget grows with the corpus
+(floor = traces/64, cap 1500 — vote noise scales with corpus size).
 
 Honest findings:
 
 - Latency, throughput and reopen-rebuild scale gracefully to 50k traces;
   rebuild is roughly linear in corpus size.
-- A **quality cliff appears between 10k and 30k** with this setup (phase-0 gate
-  FAIL). Measured so far: L1 candidate inclusion at 30k is 97% (the target is
-  in the voted candidate set almost always), and raising the candidate budget
-  ×16 does **not** recover hits — so the loss sits in the post-fetch
-  ranking/filtering stage, coinciding with the growing density of hashing-
-  embedding collisions at larger corpora. Instrumented diagnosis and a fix are
-  a phase-1 issue; until then, tens of thousands of traces on the *synthetic*
-  setup are outside the proven envelope. Note this benchmark measures mechanics
-  with a hashing embedder whose collision floor (~0.12–0.15) itself rises with
-  corpus size — a production semantic embedder behaves differently.
-- Non-monotonicity between 30k and 50k (0.87 vs 0.94) is within sampling noise
-  of 100 queries plus eviction randomness; both fail the bar.
+- A **recall-quality cliff appears between 10k and 30k** with this setup.
+  Root cause was traced with instrumentation, in two layers:
+  1. *Fixed*: the flat-noise abstention heuristic shipped with defaults tuned
+     for anisotropic semantic embedders and misfired on the hashing embedder
+     (dim=2048 compresses the whole cosine band), discarding correct answers
+     wholesale (~4pp of misses at 30k, plus silently inflating abstention to
+     1.00). It is now **opt-in via the embedder profile**
+     (`cos_min_strong_recall > 0`); the fastembed profile keeps it on.
+  2. *Open, phase 1*: vote-based candidate generation has an intrinsic
+     coverage ceiling on weak-overlap subset queries. Measured at 30k:
+     target-in-top-N votes = 0.89 @N=60, 0.93 @300, 0.96 @600, **0.98 @1200**,
+     saturating — ~2% of targets share so few SDR units with the query that
+     thousands of common-token competitors outvote them at any budget.
+     The adaptive budget buys back part of the loss (+4pp at 30k) for
+     ~+10–16 ms p50; full recovery needs phase-1 remedies: IDF-style
+     unit-frequency weighting of votes, or an embedding cache with exact-scan
+     merge (candidates = top-votes ∪ top-exact).
+- Non-monotonicity between 30k and 50k runs is within sampling noise of 100
+  queries plus eviction randomness.
 
 A quantitative comparison against LLM-backed memory services (mem0/Zep/Letta)
 is deliberately deferred until after dogfooding: they sit on a different axis
@@ -318,6 +329,10 @@ integrity, v0.3 legacy migration, stdio-e2e MCP, operational guarantees).
   synthetic setup (post-fetch stage under hashing-collision density; open
   phase-1 issue). Beyond 10⁵–10⁶ traces the hot path moves to numpy/CUDA
   (phase 3).
+- Recall quality at scale: the write-gate misfire is fixed (opt-in abstention),
+  but vote-based candidate generation caps at ~98% coverage on weak-overlap
+  queries regardless of budget (§7.3); closing the last gap needs IDF-weighted
+  voting or an embedding-cache exact merge (phase 1).
 - No quantitative comparison against LLM-backed memory services yet
   (mem0/Zep/Letta): different trade-off axis — local, deterministic, zero-cost
   writes vs richer semantics through LLM extraction. A quality+cost harness is

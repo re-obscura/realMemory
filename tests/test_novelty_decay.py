@@ -53,3 +53,14 @@ def test_config_validation():
         bad.validate()
     with pytest.raises(ValueError):
         MemoryConfig(initial_strength=1.2).validate()
+
+
+def test_flat_noise_abstention_is_opt_in():
+    """Правило «плоского шума» выключено по умолчанию: абсолютные пороги
+    непереносимы между эмбеддерами/размерностями (обрыв на 30k синтетики).
+    Включается профилем эмбеддера (fastembed: cos_min_strong_recall=0.42)."""
+    assert MemoryConfig().cos_min_strong_recall == 0.0
+    with pytest.raises(ValueError):
+        MemoryConfig(cos_min_strong_recall=0.05).validate()  # ниже косинусного пола
+    ok = MemoryConfig(cos_min_strong_recall=0.42)
+    ok.validate()

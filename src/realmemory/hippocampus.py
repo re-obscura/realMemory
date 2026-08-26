@@ -127,6 +127,7 @@ class Hippocampus:
         self._rng = np.random.default_rng(self.config.sdr_seed + 2)
         self._unit_index: dict[int, set[int]] = {}
         self._edges_rev_seen = -1
+        self._trace_count = self.store.count()
         self._rebuild_volatile()
 
     # -- конструирование ---------------------------------------------------------
@@ -268,6 +269,14 @@ class Hippocampus:
         if self.store.edges_rev() != self._edges_rev_seen:
             self._reload_network_cache()
 
+    def _candidate_budget(self, base: int, *, divisor: int = 64, cap: int = 1500) -> int:
+        """Бюджет кандидатов L1 растёт с размером базы: шум голосования
+        («конкуренты» с одним общим словом) растёт с корпусом, и фиксированный
+        k·oversample на десятках тысяч следов вытесняет цели со слабым
+        пересечением юнитов. Пол = traces/divisor с потолком cap."""
+        floor = min(cap, self._trace_count // divisor)
+        return max(base, floor)
+
     def _encode(self, text: str, *, query: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """Кодирование текста. Для поисковых запросов используется embed_query(),
         если эмбеддер его предоставляет (асимметричные модели вроде e5)."""
@@ -304,7 +313,12 @@ class Hippocampus:
         Гейт сравнивает текст только со своим проектом и global — факты разных
         проектов не сливаются в REINFORCE/LINK; keyword-кандидаты ловят
         почти-дубликаты с точными токенами (ID, коды ошибок)."""
-        qr = self.index.query(sdr, max_candidates=max(2, self.config.recall_oversample * 3))
+        qr = self.index.query(
+            sdr,
+            max_candidates=self._candidate_budget(
+                max(2, self.config.recall_oversample * 3), divisor=256,
+            ),
+        )
         candidate_ids = list(qr.candidates.tolist())
         for rid in self._fts_candidates(
             text or "", limit=max(4, self.config.recall_oversample * 3)
@@ -353,6 +367,7 @@ class Hippocampus:
             scope=scope,
         )
         mid = self.store.insert(rec)
+        self._trace_count += 1
         self.index.write(sdr, mid)
         for u in np.asarray(sdr).tolist():
             self._unit_index.setdefault(int(u), set()).add(mid)
@@ -526,7 +541,10 @@ class Hippocampus:
         now = float(self.clock.now())
         emb, sdr = self._encode(query, query=True)
 
-        qr = self.index.query(sdr, max_candidates=k * self.config.recall_oversample)
+        qr = self.index.query(
+            sdr,
+            max_candidates=self._candidate_budget(k * self.config.recall_oversample),
+        )
         votes_map = {
             int(p): int(v) for p, v in zip(qr.candidates.tolist(), qr.votes.tolist())
         }
@@ -590,9 +608,13 @@ class Hippocampus:
 
         # воздержание «нет выраженного лидера»: top1 ниже сильного порога и вся
         # прямая волна лежит в узком коридоре — это шум анизотропии, а не ответ;
-        # полный keyword-матч отменяет правило (точный токен сам по себе надёжен)
+        # полный keyword-матч отменяет правило (точный токен сам по себе надёжен).
+        # Правило opt-in: включается профилем эмбеддера (cos_min_strong_recall > 0),
+        # потому что абсолютные пороги непереносимы между моделями/размерностями —
+        # на hashing dim=2048 дефолт ложно съедал корректные ответы на 30k+ фактов
         if (
             items
+            and self.config.cos_min_strong_recall > 0
             and not has_full_match
             and items[0][1] < self.config.cos_min_strong_recall
             and (items[0][1] - min(it[1] for it in items)) < self.config.abstain_spread_cos
