@@ -536,6 +536,7 @@ class Hippocampus:
         query_tokens = set(tokenize(query)) or None
         items: list[tuple[float, float, float, MemoryRecord, str]] = []
         seen: set[int] = set()
+        has_full_match = False
 
         def conf_direct(cos: float, votes_norm: float, ret: float) -> float:
             return cos * (self.config.w_votes + (1 - self.config.w_votes) * min(1.0, votes_norm)) * (
@@ -551,14 +552,30 @@ class Hippocampus:
             ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, self.config)
             if ret < self.config.min_retention_recall:
                 continue
+            # полный keyword-матч (все токены запроса есть в следе): точное
+            # совпадение надёжнее слабого косинуса — бустим уверенность до
+            # keyword-уровня, иначе редкий токен тонет среди анизотропно-похожих
+            # фактов. Источник остаётся direct, если косинус сам прошёл порог;
+            # keyword — только когда семантики не хватило и держит нас токен.
+            full_match = False
+            doc_tokens: set[str] | None = None
+            if int(rec.id) in kw_ids and query_tokens:
+                doc_tokens = set(tokenize(rec.text))
+                full_match = bool(query_tokens <= doc_tokens)
             if cos >= self.config.cos_min_recall:
                 vnorm = votes_map.get(int(rec.id), 0) / max(1, qr.active_locations)
                 c = conf_direct(cos, vnorm, ret)
+                if full_match:
+                    c = max(c, self.config.w_keyword * (0.3 + 0.7 * ret))
+                    has_full_match = True
                 source = SOURCE_DIRECT
-            elif int(rec.id) in kw_ids and query_tokens:
-                # точное совпадение токенов при низком косинусе; уверенность
+            elif full_match:
+                c = self.config.w_keyword * (0.3 + 0.7 * ret)
+                source = SOURCE_KEYWORD
+                has_full_match = True
+            elif int(rec.id) in kw_ids and query_tokens and doc_tokens is not None:
+                # частичное совпадение токенов при низком косинусе; уверенность
                 # пропорциональна доле запросных токенов в следе
-                doc_tokens = set(tokenize(rec.text))
                 overlap = len(doc_tokens & query_tokens) / len(query_tokens)
                 if overlap <= 0.0:
                     continue
@@ -570,6 +587,25 @@ class Hippocampus:
             seen.add(int(rec.id))
         items.sort(key=lambda t: (-t[0], t[3].id))
         items = items[:k]
+
+        # воздержание «нет выраженного лидера»: top1 ниже сильного порога и вся
+        # прямая волна лежит в узком коридоре — это шум анизотропии, а не ответ;
+        # полный keyword-матч отменяет правило (точный токен сам по себе надёжен)
+        if (
+            items
+            and not has_full_match
+            and items[0][1] < self.config.cos_min_strong_recall
+            and (items[0][1] - min(it[1] for it in items)) < self.config.abstain_spread_cos
+        ):
+            latency_ms = (_time.perf_counter() - t0) * 1000.0
+            packet = RecallPacket(query=query, items=(), abstained=True,
+                                  latency_ms=latency_ms)
+            self.journal.append(
+                "recall",
+                k=k, items=0, abstained=True, latency_ms=round(latency_ms, 3),
+                top_conf=None, flat_noise=True, t=now,
+            )
+            return packet
 
         # волна ассоциаций: spread от SDR топ-следов по пластичным рёбрам;
         # сигнал связи — достижимые юниты, поэтому косинусный фильтр не применяется

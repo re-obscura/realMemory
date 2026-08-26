@@ -90,6 +90,11 @@ def test_fastembed_threshold_profile_exists():
     pytest.importorskip("fastembed")
     from realmemory.encoding.embedder_local import FastEmbedProvider
 
-    profile = FastEmbedProvider.recommended_thresholds
-    assert 0.30 <= profile["theta_link"] <= 0.40
-    assert 0.13 <= profile["cos_min_recall"] <= 0.20
+    p = FastEmbedProvider.recommended_thresholds
+    # выведено из bench_real: нуль «факт—сосед» p95≈0.58/max≈0.65,
+    # сигнал дубликатов min≈0.63 → reinforce выше нуля, link на его границе
+    assert 0.65 <= p["theta_reinforce"] <= 0.75
+    assert 0.55 <= p["theta_link"] <= 0.62
+    assert 0.13 <= p["cos_min_recall"] <= 0.20
+    assert 0.38 <= p["cos_min_strong_recall"] <= 0.48
+    assert 0.12 <= p["abstain_spread_cos"] <= 0.30

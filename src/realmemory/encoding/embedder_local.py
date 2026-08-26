@@ -35,11 +35,19 @@ class FastEmbedProvider:
     замком; нагрузка одиночного агента это полностью покрывает.
     """
 
-    # Пороги гейта/отбора под анизотропию MiniLM paraphrase-multilingual
-    # (замеры 2026-08: несвязные пары cos <= 0.26, переформулировки >= 0.59).
+    # Пороги под анизотропию MiniLM paraphrase-multilingual — выведены из
+    # fixtures/bench_real.json (103 факта RU/EN, python -m realmemory.eval.bench_real):
+    # нуль «факт—сосед» p95=0.578/max=0.653 против сигнала дубликатов min=0.633,
+    # поэтому reinforce=0.70 даёт ноль ложных склеек (пара на грани уходит в LINK);
+    # link=0.58 держит ложные ассоциации в пределах хвоста нуля;
+    # abstain: top1 шума p50=0.29/p95=0.47 при плоском разбросе против
+    # переформулировок top1 p10=0.40 с выраженным лидером.
     recommended_thresholds: ClassVar[dict[str, float]] = {
-        "theta_link": 0.30,
+        "theta_reinforce": 0.70,
+        "theta_link": 0.58,
         "cos_min_recall": 0.15,
+        "cos_min_strong_recall": 0.42,
+        "abstain_spread_cos": 0.20,
     }
 
     def __init__(
