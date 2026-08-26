@@ -44,6 +44,9 @@ class MemoryConfig:
     edge_min_weight: float = 0.02
     max_pairs_per_bind: int = 256
 
+    # -- эксплуатация -----------------------------------------------------------
+    backups_keep: int = 10  # копий в <каталог базы>/backups перед каждым «сном»; 0 — выключить
+
     # -- spread (ассоциативное распространение) -------------------------------
     spread_depth: int = 2
     spread_alpha: float = 0.5
@@ -82,6 +85,8 @@ class MemoryConfig:
             raise ValueError("w_keyword должен быть в (0, 1]")
         if self.recall_oversample < 1 or self.max_pairs_per_bind < 1:
             raise ValueError("recall_oversample и max_pairs_per_bind должны быть >= 1")
+        if self.backups_keep < 0:
+            raise ValueError("backups_keep должен быть >= 0")
 
     @classmethod
     def dev(cls) -> MemoryConfig:

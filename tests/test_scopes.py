@@ -92,6 +92,8 @@ def test_legacy_db_without_scope_column_migrates(tmp_path):
     try:
         assert store.get(1).scope == "global"
         assert store.count(scope="global") == 1
+        # миграции схемы предшествует страховочная копия
+        assert list((tmp_path / "backups").glob("memory-*.db"))
     finally:
         store.close()
 

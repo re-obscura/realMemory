@@ -223,6 +223,13 @@ def render(report: dict[str, Any]) -> str:
     add(f"  средняя уверенность топа: {rec.get('mean_top_confidence')}")
     fb = js.get("feedback", {})
     add(f"  feedback: вызовов {fb.get('calls')} (+{fb.get('positive', 0)} / -{fb.get('negative', 0)})")
+    if rec.get("count"):
+        # дисциплина обучения: ниже ~0.1 — память забывает и повышает вслепую
+        ratio = (fb.get("calls") or 0) / rec["count"]
+        add(f"  reflect/recall: {ratio:.2f} {'(низкая дисциплина feedback)' if ratio < 0.1 else ''}")
+    errors = js.get("by_type", {}).get("hook_error", 0)
+    if errors:
+        add(f"  [!] отказы хуков: {errors} — см. события hook_error")
 
     cons = js.get("consolidation", {})
     add("")

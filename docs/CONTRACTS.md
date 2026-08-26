@@ -79,7 +79,8 @@ recall_oversample`), гейт (`theta_reinforce ≥ theta_link > cos_min_recall`
 затухание (`tau_episodic < tau_semantic`, `min_retention_recall`,
 `initial_strength ≤ strength_cap`), связи (`tau_eligibility < tau_edge_stable`,
 `edge_min_weight`, `max_pairs_per_bind`), spread (`depth, alpha, top_m, eps`),
-ранжирование (`w_votes, assoc_confidence_penalty, w_keyword`).
+ранжирование (`w_votes, assoc_confidence_penalty, w_keyword`),
+эксплуатация (`backups_keep`: 0 выключает копии перед «сном»).
 
 Фабрики: `MemoryConfig.dev()` — малые размеры для тестов/демо;
 `MemoryConfig.production()` — целевые масштабы фазы 3.
@@ -271,9 +272,17 @@ class MemoryStore(path, dim):                        # контекстный м
 class StorageError(Exception)
 ```
 
+    def max_updated_at() -> float | None                         # для троттлинга сна
+    def backup(dest_dir=None, keep=10) -> Path                   # консистентная копия
+                                                                 # (sqlite backup API) + ротация;
+                                                                 # вызывается на consolidate()
+class StorageError(Exception)
+```
+
 Сериализация: embedding→float32 blob, sdr→int32 blob.
 `iter_active` не возвращает superseded. Базы до появления колонок мигрируют
-ALTER'ом при открытии (scope → default 'global').
+ALTER'ом при открытии (scope → default 'global'); изменению схемы предшествует
+автоматический бэкап. `db_meta['schema_version']` — версия схемы.
 `db_meta['embedder']` — имя провайдера, создавшего векторы; `db_meta['config']`
 — геометрия (dim/n_units/sdr_seed); Hippocampus отклоняет несовместимое
 открытие (RuntimeError).

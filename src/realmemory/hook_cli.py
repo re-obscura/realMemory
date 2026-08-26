@@ -17,6 +17,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 
@@ -193,6 +194,28 @@ def cmd_sleep(args) -> int:
     return 0
 
 
+def _report_hook_error(args, exc: BaseException) -> None:
+    """Оставить след об упавшем хуке в журнале событий (best effort)."""
+    try:
+        root = _resolve_hook_root(Path(args.path), getattr(args, "namespace", None))
+        con = sqlite3.connect(str(root / "memory.db"), timeout=2)
+        try:
+            con.execute(
+                "INSERT INTO events(ts, type, data) VALUES(?,?,?)",
+                (
+                    time.time(),
+                    "hook_error",
+                    json.dumps({"cmd": args.cmd, "error": str(exc)},
+                               ensure_ascii=False),
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001, S110 - сообщать об ошибке сообщения об ошибке поздно
+        pass
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="realmemory-hooks")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -215,7 +238,17 @@ def main(argv=None) -> None:
     s.set_defaults(fn=cmd_sleep)
 
     args = parser.parse_args(argv)
-    sys.exit(args.fn(args))
+    try:
+        code = args.fn(args)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - хук не должен ломать сессию агента
+        # тишина при отказе хука недопустима для эксплуатации: ошибка видна в
+        # stderr сессии и остаётся в журнале событий для отчёта
+        _report_hook_error(args, exc)
+        print(f"[realmemory] hook {args.cmd} failed: {exc}", file=sys.stderr)
+        code = 0
+    sys.exit(code)
 
 
 if __name__ == "__main__":

@@ -714,6 +714,13 @@ class Hippocampus:
         консолидации других процессов сериализуются транзакцией."""
         t0 = _time.perf_counter()
         now = float(self.clock.now())
+        # страховочная копия до любых изменений; сбой бэкапа не отменяет «сон»,
+        # но остаётся в журнале
+        if self.config.backups_keep > 0:
+            try:
+                self.store.backup(keep=self.config.backups_keep)
+            except Exception as exc:  # noqa: BLE001 - сон важнее идеального бэкапа
+                self.journal.append("backup_error", error=str(exc))
         rewards_applied = self.store.consume_meta_int("pending_reward_touches")
         rows = self.store.elig_drain()
         committed = pruned = 0

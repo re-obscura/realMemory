@@ -19,6 +19,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,6 +27,10 @@ from pathlib import Path
 import numpy as np
 
 from ..types import STATUS_ACTIVE, MemoryRecord
+
+# Версия схемы; растёт при несовместимых изменениях. Миграции выполняются
+# при открытии, перед изменением схемы делается автоматический бэкап.
+SCHEMA_VERSION = 1
 
 # Схема списком стейтментов: executescript() внутри BEGIN не годится
 # (он неявно коммитит транзакцию).
@@ -206,16 +211,31 @@ class MemoryStore:
             with self._txn() as con:
                 for stmt in _SCHEMA_STATEMENTS:
                     con.execute(stmt)
-                # миграция баз, созданных до появления scope; индекс строго
-                # после гарантии колонки — иначе на legacy-базе нет такого столбца
-                cols = {r[1] for r in con.execute("PRAGMA table_info(memories)")}
-                if "scope" not in cols:
+            # миграция баз, созданных до появления scope; индекс строго после
+            # гарантии колонки — иначе на legacy-базе нет такого столбца.
+            # Изменению схемы всегда предшествует страховочная копия.
+            with self._lock:
+                cols = {
+                    r[1] for r in self._conn.execute(
+                        "PRAGMA table_info(memories)"
+                    ).fetchall()
+                }
+            scope_missing = "scope" not in cols
+            if scope_missing:
+                self.backup()
+            with self._txn() as con:
+                if scope_missing:
                     con.execute(
                         "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL "
                         "DEFAULT 'global'"
                     )
                 con.execute(
                     "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)"
+                )
+                con.execute(
+                    "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
+                    "ON CONFLICT(key) DO NOTHING",
+                    (str(SCHEMA_VERSION),),
                 )
             self._fts_error: str | None = None
             try:
@@ -315,6 +335,27 @@ class MemoryStore:
         with self._lock:
             row = self._conn.execute("SELECT MAX(updated_at) FROM memories").fetchone()
         return None if row is None or row[0] is None else float(row[0])
+
+    def backup(self, dest_dir: str | Path | None = None, keep: int = 10) -> Path:
+        """Консистентная копия базы через sqlite backup API + ротация.
+
+        Копии складываются в <каталог базы>/backups/memory-<timestamp>.db;
+        остаются последние `keep` штук (keep=0 — копия без ротации).
+        Возвращает путь свежей копии."""
+        dest_dir = Path(dest_dir) if dest_dir else self.path.parent / "backups"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"memory-{time.strftime('%Y%m%d-%H%M%S')}.db"
+        with self._lock:
+            out = sqlite3.connect(str(dest))
+            try:
+                self._conn.backup(out)
+            finally:
+                out.close()
+        if keep > 0:
+            olds = sorted(dest_dir.glob("memory-*.db"))
+            for old in olds[:-keep]:
+                old.unlink(missing_ok=True)
+        return dest
 
     # -- мета базы -----------------------------------------------------------------
 
