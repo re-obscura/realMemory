@@ -28,6 +28,12 @@ class MemoryConfig:
     # (на hashing dim=2048 вся шкала ниже — правило ложно съедало корректные ответы).
     cos_min_strong_recall: float = 0.0
     abstain_spread_cos: float = 0.20
+    # относительное воздержание точного скана: топ-1 обязан превышать медиану
+    # косинусного рейтинга корпуса хотя бы на margin. Порог масштабируется сам
+    # (медиана = центр анизотропной массы), поэтому переносим между размерностями
+    # одного эмбеддера; для семантических моделей переформулировки лежат близко
+    # к нулевой медиане — там правило выключено и работают абсолютные профили.
+    exact_abstain_rel_margin: float = 0.0
 
     # -- следы и затухание (секунды) -----------------------------------------
     tau_episodic: float = 30 * SECONDS_PER_DAY
@@ -47,12 +53,26 @@ class MemoryConfig:
 
     # -- эксплуатация -----------------------------------------------------------
     backups_keep: int = 10  # копий в <каталог базы>/backups перед каждым «сном»; 0 — выключить
+    backup_min_interval_s: float = 6 * 3600.0  # троттлинг бэкапов; 0 — копия на каждом «сне»
+    journal_max_events: int = 200_000  # ротация журнала событий (0 — без ротации)
 
     # -- spread (ассоциативное распространение) -------------------------------
     spread_depth: int = 2
     spread_alpha: float = 0.5
     spread_top_m: int = 32
     spread_eps: float = 0.01
+
+    # -- извлечение -------------------------------------------------------------
+    # Основной ретривер recall по умолчанию — точный косинус-скан по кэшу
+    # эмбеддингов активных следов (gemv за миллисекунды до сотен тысяч следов,
+    # полнота 100% — обрыва качества голосования нет). Голосование L1 остаётся
+    # автоматическим откатом при превышении лимита и режимом для тех, кто
+    # экономит RAM. Стоимости: dim×4 байт × N следов на процесс.
+    exact_scan_recall: bool = True
+    exact_scan_max_traces: int = 300_000
+    # поведение confidence в точном режиме: votes отсутствуют, поэтому вклад
+    # w_votes игнорируется (conf = cos × retention-фактор); при выключенном
+    # скане действует полная формула w_votes
 
     # -- ранжирование recall ---------------------------------------------------
     w_votes: float = 0.5
@@ -74,6 +94,8 @@ class MemoryConfig:
             )
         if self.abstain_spread_cos <= 0:
             raise ValueError("abstain_spread_cos должен быть положительным")
+        if self.exact_abstain_rel_margin < 0:
+            raise ValueError("exact_abstain_rel_margin должен быть >= 0")
         if self.bucket_cap <= 0:
             raise ValueError("bucket_cap должен быть положительным")
         if self.tau_episodic <= 0 or self.tau_semantic <= self.tau_episodic:
@@ -92,23 +114,17 @@ class MemoryConfig:
             raise ValueError("recall_oversample и max_pairs_per_bind должны быть >= 1")
         if self.backups_keep < 0:
             raise ValueError("backups_keep должен быть >= 0")
+        if self.backup_min_interval_s < 0:
+            raise ValueError("backup_min_interval_s должен быть >= 0")
+        if self.journal_max_events < 0:
+            raise ValueError("journal_max_events должен быть >= 0")
+        if self.exact_scan_max_traces < 1:
+            raise ValueError("exact_scan_max_traces должен быть >= 1")
 
     @classmethod
     def dev(cls) -> MemoryConfig:
         """Малые размеры для тестов и демо (быстро, всё влезает в память ноутбука)."""
         return cls()
-
-    @classmethod
-    def production(cls) -> MemoryConfig:
-        """Целевые масштабы фазы 3: ~10^5–10^6 следов, десятки МБ весов."""
-        cfg = cls(
-            dim=1024,
-            n_units=8192,
-            k_sparse=128,
-            bucket_cap=256,
-        )
-        cfg.validate()
-        return cfg
 
     def snapshot_fields(self) -> dict:
         return {f.name: getattr(self, f.name) for f in fields(self)}

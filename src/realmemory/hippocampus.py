@@ -8,7 +8,10 @@ remember/recall/feedback/consolidate. Контракт: docs/CONTRACTS.md.
 в SQLite и пишется сквозь — несколько процессов (MCP-сервер + хуки) работают
 с одной базой без потери состояния. При открытии перестраиваются только
 производные структуры: L1-бакеты и юнит-индекс — из БД детерминированно,
-CSR-кэш рёбер L2 — из таблицы edges.
+CSR-кэш рёбер L2 — из таблицы edges, кэш эмбеддингов точного скана — из блобов.
+
+Ретривер recall по умолчанию — точный косинус-скан по кэшу (exact_scan_recall);
+голосование L1 включается автоматически при превышении exact_scan_max_traces.
 """
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ from .encoding.embedder import EmbeddingProvider, HashingEmbedder
 from .encoding.sdr import SDREncoder
 from .policies.decay import reinforce_values, retention, should_promote, weaken_value
 from .policies.novelty import gate
-from .store.sqlite_store import MemoryStore, build_fts_query, tokenize
+from .store.sqlite_store import MemoryStore, build_fts_query, search_tokens
 from .timeprov import SystemClock, TimeProvider
 from .types import (
     KIND_EPISODIC,
@@ -128,6 +131,13 @@ class Hippocampus:
         self._unit_index: dict[int, set[int]] = {}
         self._edges_rev_seen = -1
         self._trace_count = self.store.count()
+        # кэш эмбеддингов активных следов (точный скан): амортизированные буферы,
+        # растут вдвое — вставка не копирует весь массив на каждом remember
+        self._emb_cap = 0
+        self._emb_len = 0
+        self._emb_buf = np.zeros((0, self.config.dim), dtype=np.float32)
+        self._idbuf = np.zeros(0, dtype=np.int64)
+        self._emb_pos: dict[int, int] = {}
         self._rebuild_volatile()
 
     # -- конструирование ---------------------------------------------------------
@@ -247,12 +257,52 @@ class Hippocampus:
                                     ts=float(self.clock.now()))
 
     def _rebuild_volatile(self) -> None:
-        """Производные структуры при открытии: L1-бакеты, юнит-индекс, CSR рёбер."""
+        """Производные структуры при открытии: L1-бакеты, юнит-индекс, кэш
+        эмбеддингов, CSR рёбер."""
         for rec in self.store.iter_active():
             self.index.write(rec.sdr, int(rec.id))
             for u in rec.sdr.tolist():
                 self._unit_index.setdefault(int(u), set()).add(int(rec.id))
+            self._cache_append(int(rec.id), rec.embedding)
         self._reload_network_cache()
+
+    # -- кэш эмбеддингов (точный скан) ------------------------------------------
+
+    def _grow_emb_cache(self, needed: int) -> None:
+        if needed <= self._emb_cap:
+            return
+        new_cap = max(needed, max(64, self._emb_cap * 2))
+        emb = np.zeros((new_cap, self.config.dim), dtype=np.float32)
+        ids = np.zeros(new_cap, dtype=np.int64)
+        if self._emb_len:
+            emb[: self._emb_len] = self._emb_buf[: self._emb_len]
+            ids[: self._emb_len] = self._idbuf[: self._emb_len]
+        self._emb_buf, self._idbuf, self._emb_cap = emb, ids, new_cap
+
+    def _cache_append(self, memory_id: int, emb: np.ndarray) -> None:
+        """Добавить след в кэш точного скана. Superseded-следы остаются в буфере
+        до перезапуска процесса — фильтруются по статусу после чтения записи."""
+        self._grow_emb_cache(self._emb_len + 1)
+        self._emb_buf[self._emb_len] = emb
+        self._idbuf[self._emb_len] = int(memory_id)
+        self._emb_pos[int(memory_id)] = self._emb_len
+        self._emb_len += 1
+
+    def _exact_mode(self) -> bool:
+        return (
+            bool(getattr(self.config, "exact_scan_recall", False))
+            and self._trace_count <= self.config.exact_scan_max_traces
+        )
+
+    def _cosine_ranked(self, emb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(id, косинус) всех закэшированных следов по убыванию похожести.
+        Нулевой запрос даёт нули — без распада на деление."""
+        qn = float(np.linalg.norm(emb))
+        qv = (emb / np.float32(qn)).astype(np.float32) if qn > 0.0 else emb.astype(np.float32)
+        view = self._emb_buf[: self._emb_len]
+        sims = view @ qv if self._emb_len else np.empty(0, dtype=np.float32)
+        order = np.argsort(-sims, kind="stable")
+        return self._idbuf[: self._emb_len][order], sims[order]
 
     def _reload_network_cache(self) -> None:
         keys, ws = self.store.edges_load()
@@ -309,10 +359,46 @@ class Hippocampus:
     def _probe(self, emb: np.ndarray, sdr: np.ndarray,
                scope: str | None = None,
                text: str | None = None) -> tuple[int | None, float, tuple[int, ...]]:
-        """Лучший существующий след по косинусу среди кандидатов L1 + FTS.
+        """Лучший существующий след по косинусу среди кандидатов + FTS.
         Гейт сравнивает текст только со своим проектом и global — факты разных
         проектов не сливаются в REINFORCE/LINK; keyword-кандидаты ловят
-        почти-дубликаты с точными токенами (ID, коды ошибок)."""
+        почти-дубликаты с точными токенами (ID, коды ошибок).
+
+        Точный режим сканирует глобальный рейтинг косинусов и останавливается
+        рано: как только набраны best и `near`, а следующий по списку косинус
+        опустился ниже theta_link, дальше подходящих нет (рейтинг убывающий).
+        Режим голосования сохранён для больших баз и сравнения режимов."""
+        near_ids: list[tuple[float, int]] = []
+        if self._exact_mode():
+            ranked_ids, ranked_cos = self._cosine_ranked(emb)
+            best_id: int | None = None
+            best_cos = 0.0
+            if ranked_ids.size:
+                # интересуют только следы с косинусом >= theta_link; в убывающем
+                # рейтинге это префикс известной длины — глубже смотреть незачем
+                cnt_link = int(np.searchsorted(-ranked_cos, -self.config.theta_link,
+                                               side="right"))
+                budget = self._candidate_budget(
+                    max(2, self.config.recall_oversample * 3), divisor=256,
+                )
+                probe_ids = [int(i) for i in ranked_ids[: min(cnt_link, budget)].tolist()]
+                recs = self.store.get_many(probe_ids)
+                if recs:
+                    qn = float(np.linalg.norm(emb))
+                    qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+                    sims = np.stack([r.embedding for r in recs]) @ qv
+                    for rec, sim in zip(recs, sims.tolist()):
+                        if rec.status != STATUS_ACTIVE:
+                            continue
+                        if not self._scope_allows(rec.scope, scope, all_scopes=False):
+                            continue
+                        cos = max(0.0, sim)
+                        if best_id is None:
+                            best_id, best_cos = int(rec.id), cos
+                        elif cos >= self.config.theta_link and len(near_ids) < 4:
+                            near_ids.append((cos, int(rec.id)))
+            return best_id, best_cos, tuple(i for _, i in sorted(near_ids, key=lambda t: -t[0]))
+
         qr = self.index.query(
             sdr,
             max_candidates=self._candidate_budget(
@@ -328,12 +414,17 @@ class Hippocampus:
         if not candidate_ids:
             return None, 0.0, ()
         scored: list[tuple[int, float]] = []
-        for rec in self.store.get_many(candidate_ids):
-            if rec.status != STATUS_ACTIVE:
-                continue
-            if not self._scope_allows(rec.scope, scope, all_scopes=False):
-                continue
-            scored.append((int(rec.id), max(0.0, self._cosine(emb, rec.embedding))))
+        recs = self.store.get_many(candidate_ids)
+        if recs:
+            qn = float(np.linalg.norm(emb))
+            qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+            sims = np.stack([r.embedding for r in recs]) @ qv
+            for rec, sim in zip(recs, sims.tolist()):
+                if rec.status != STATUS_ACTIVE:
+                    continue
+                if not self._scope_allows(rec.scope, scope, all_scopes=False):
+                    continue
+                scored.append((int(rec.id), max(0.0, sim)))
         if not scored:
             return None, 0.0, ()
         scored.sort(key=lambda t: -t[1])
@@ -371,6 +462,7 @@ class Hippocampus:
         self.index.write(sdr, mid)
         for u in np.asarray(sdr).tolist():
             self._unit_index.setdefault(int(u), set()).add(mid)
+        self._cache_append(mid, rec.embedding)
         return mid
 
     def _sample_pairs(self, ua: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -541,70 +633,154 @@ class Hippocampus:
         now = float(self.clock.now())
         emb, sdr = self._encode(query, query=True)
 
-        qr = self.index.query(
-            sdr,
-            max_candidates=self._candidate_budget(k * self.config.recall_oversample),
-        )
-        votes_map = {
-            int(p): int(v) for p, v in zip(qr.candidates.tolist(), qr.votes.tolist())
-        }
-        # keyword-канал: точные токены, которые семантика/хэши могут недотянуть
+        # Два движка кандидатов:
+        #  exact — точный косинус-скан по кэшу эмбеддингов: полнота без обрыва
+        #    голосования, порядок обхода — глобальный рейтинг похожести;
+        #  votes — исторический L1-поиск голосами юнитов + FTS (большие базы).
+        use_exact = self._exact_mode()
+        engine = "exact" if use_exact else "votes"
         kw_ids = set(self._fts_candidates(query, limit=k * self.config.recall_oversample))
-        candidate_ids = list(votes_map.keys()) + sorted(kw_ids - set(votes_map.keys()))
-        query_tokens = set(tokenize(query)) or None
+        query_tokens = search_tokens(query) or None
+
         items: list[tuple[float, float, float, MemoryRecord, str]] = []
         seen: set[int] = set()
         has_full_match = False
+        w_votes_eff = 1.0 if use_exact else self.config.w_votes
+        qr_active = 0
+        votes_map: dict[int, int] = {}
 
         def conf_direct(cos: float, votes_norm: float, ret: float) -> float:
-            return cos * (self.config.w_votes + (1 - self.config.w_votes) * min(1.0, votes_norm)) * (
+            return cos * (w_votes_eff + (1 - w_votes_eff) * min(1.0, votes_norm)) * (
                 0.3 + 0.7 * ret
             )
 
-        for rec in self.store.get_many(candidate_ids):
+        def ret_factor(ret: float) -> float:
+            return 0.3 + 0.7 * ret
+
+        def evaluate(rec: MemoryRecord, cos: float) -> None:
+            """Ветвление скоринга одного кандидата (общее для обоих проходов).
+            Косинус приходит предвычисленным: точный скан считает его gemv,
+            FTS-довесок и голосовательное окно — векторно по стопке строк."""
+            nonlocal has_full_match
             if rec.status != STATUS_ACTIVE and not include_superseded:
-                continue
+                return
             if not self._scope_allows(rec.scope, scope, all_scopes):
-                continue
-            cos = max(0.0, self._cosine(emb, rec.embedding))
-            ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, self.config)
+                return
+            cos = max(0.0, cos)
+            ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind,
+                            self.config)
             if ret < self.config.min_retention_recall:
-                continue
+                return
             # полный keyword-матч (все токены запроса есть в следе): точное
-            # совпадение надёжнее слабого косинуса — бустим уверенность до
-            # keyword-уровня, иначе редкий токен тонет среди анизотропно-похожих
-            # фактов. Источник остаётся direct, если косинус сам прошёл порог;
-            # keyword — только когда семантики не хватило и держит нас токен.
+            # совпадение надёжнее слабого косинуса; источник остаётся direct,
+            # если косинус сам прошёл порог, keyword — только когда семантики
+            # не хватило и держит нас токен
             full_match = False
             doc_tokens: set[str] | None = None
             if int(rec.id) in kw_ids and query_tokens:
-                doc_tokens = set(tokenize(rec.text))
+                doc_tokens = search_tokens(rec.text)
                 full_match = bool(query_tokens <= doc_tokens)
             if cos >= self.config.cos_min_recall:
-                vnorm = votes_map.get(int(rec.id), 0) / max(1, qr.active_locations)
+                vnorm = votes_map.get(int(rec.id), 0) / max(1, qr_active)
                 c = conf_direct(cos, vnorm, ret)
                 if full_match:
-                    c = max(c, self.config.w_keyword * (0.3 + 0.7 * ret))
+                    c = max(c, self.config.w_keyword * ret_factor(ret))
                     has_full_match = True
                 source = SOURCE_DIRECT
             elif full_match:
-                c = self.config.w_keyword * (0.3 + 0.7 * ret)
+                c = self.config.w_keyword * ret_factor(ret)
                 source = SOURCE_KEYWORD
                 has_full_match = True
             elif int(rec.id) in kw_ids and query_tokens and doc_tokens is not None:
-                # частичное совпадение токенов при низком косинусе; уверенность
-                # пропорциональна доле запросных токенов в следе
                 overlap = len(doc_tokens & query_tokens) / len(query_tokens)
                 if overlap <= 0.0:
-                    continue
-                c = self.config.w_keyword * overlap * (0.3 + 0.7 * ret)
+                    return
+                c = self.config.w_keyword * overlap * ret_factor(ret)
                 source = SOURCE_KEYWORD
             else:
-                continue
+                return
             items.append((c, cos, ret, rec, source))
             seen.add(int(rec.id))
+
+        if not use_exact:
+            qr = self.index.query(
+                sdr,
+                max_candidates=self._candidate_budget(k * self.config.recall_oversample),
+            )
+            qr_active = int(qr.active_locations)
+            votes_map = {
+                int(p): int(v) for p, v in zip(qr.candidates.tolist(), qr.votes.tolist())
+            }
+            candidates = list(votes_map.keys()) + sorted(
+                rid for rid in kw_ids if rid not in votes_map
+            )
+            recs = self.store.get_many(candidates)
+            if recs:
+                qn = float(np.linalg.norm(emb))
+                qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+                sims = np.stack([r.embedding for r in recs]) @ qv
+                for rec, sim in zip(recs, sims.tolist()):
+                    evaluate(rec, sim)
+
+        if use_exact:
+            ranked_ids, ranked_cos = self._cosine_ranked(emb)
+            # словарь id -> косинус из глобального рейтинга: позиция в буфере
+            # не равна позиции в отсортированном порядке
+            rank_cos_by_id = dict(zip(ranked_ids.tolist(), ranked_cos.tolist()))
+            window_target = self._candidate_budget(k * self.config.recall_oversample)
+            step = 64
+            start = 0
+            while start < len(ranked_ids):
+                stop_ids = [int(i) for i in ranked_ids[start:start + step].tolist()]
+                for rec in self.store.get_many(stop_ids):
+                    evaluate(rec, float(rank_cos_by_id.get(int(rec.id), 0.0)))
+                start += step
+                # ранний выход между подбатчами: топ-k укомплектован, объём
+                # разведки не меньше окна голосования, а сильнейший из остатка
+                # не может вытеснить слабейшего в выбранном
+                # (у direct-канала c <= cos при w_votes_eff = 1)
+                if len(items) >= k and start >= window_target:
+                    next_best_cos = float(ranked_cos[start]) if start < len(ranked_cos) else 0.0
+                    if next_best_cos <= min(it[0] for it in items):
+                        break
+            # проход B: все FTS-кандидаты вне уже оценённых — keyword-буст
+            # обязан сохранить шансы независимо от глубины в рейтинге
+            kw_extras = sorted(rid for rid in kw_ids if rid not in seen)
+            if kw_extras:
+                qn = float(np.linalg.norm(emb))
+                qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+                for rec in self.store.get_many(kw_extras):
+                    cos = float(np.dot(rec.embedding, qv)) if rec.embedding.size else 0.0
+                    evaluate(rec, cos)
+
         items.sort(key=lambda t: (-t[0], t[3].id))
         items = items[:k]
+
+        # относительное воздержание точного скана: центр анизотропной массы
+        # (медиана рейтинга корпуса) сам масштабируется с эмбеддером/размерностью,
+        # поэтому правило переносимо туда, где абсолютные пороги не выживают.
+        # Ответ обязан возвышаться над медианой хотя бы на margin; полный
+        # keyword-матч отменяет правило — точный токен сам по себе надёжен.
+        if (
+            use_exact
+            and items
+            and not has_full_match
+            and self.config.exact_abstain_rel_margin > 0
+            and ranked_cos.size
+        ):
+            stride = max(1, ranked_cos.size // 512)
+            null_median = float(np.median(ranked_cos[::stride]))
+            if items[0][1] < null_median + self.config.exact_abstain_rel_margin:
+                latency_ms = (_time.perf_counter() - t0) * 1000.0
+                packet = RecallPacket(query=query, items=(), abstained=True,
+                                      latency_ms=latency_ms)
+                self.journal.append(
+                    "recall",
+                    k=k, items=0, abstained=True, latency_ms=round(latency_ms, 3),
+                    top_conf=None, below_null=True,
+                    null_median=round(null_median, 4), engine=engine, t=now,
+                )
+                return packet
 
         # воздержание «нет выраженного лидера»: top1 ниже сильного порога и вся
         # прямая волна лежит в узком коридоре — это шум анизотропии, а не ответ;
@@ -625,7 +801,7 @@ class Hippocampus:
             self.journal.append(
                 "recall",
                 k=k, items=0, abstained=True, latency_ms=round(latency_ms, 3),
-                top_conf=None, flat_noise=True, t=now,
+                top_conf=None, flat_noise=True, engine=engine, t=now,
             )
             return packet
 
@@ -690,6 +866,7 @@ class Hippocampus:
             abstained=packet.abstained,
             latency_ms=round(latency_ms, 3),
             top_conf=out[0].confidence if out else None,
+            engine=engine,
             t=now,
         )
         return packet
@@ -736,13 +913,28 @@ class Hippocampus:
         консолидации других процессов сериализуются транзакцией."""
         t0 = _time.perf_counter()
         now = float(self.clock.now())
-        # страховочная копия до любых изменений; сбой бэкапа не отменяет «сон»,
-        # но остаётся в журнале
+        # страховочная копия до любых изменений; троттлинг по wall-clock — сны
+        # после каждого ответа агента не обязаны копировать всю базу. Сбой
+        # бэкапа не отменяет «сон», но остаётся в журнале.
         if self.config.backups_keep > 0:
             try:
-                self.store.backup(keep=self.config.backups_keep)
+                copied = self.store.backup(
+                    keep=self.config.backups_keep,
+                    min_interval_s=self.config.backup_min_interval_s,
+                )
+                if copied is None:
+                    self.journal.append(
+                        "backup_skipped", interval_s=self.config.backup_min_interval_s
+                    )
             except Exception as exc:  # noqa: BLE001 - сон важнее идеального бэкапа
                 self.journal.append("backup_error", error=str(exc))
+        # ротация журнала после бэкапа: обрезанные события остаются в копии
+        journal_pruned = 0
+        if self.config.journal_max_events > 0:
+            journal_pruned = self.store.events_prune(self.config.journal_max_events)
+            if journal_pruned:
+                self.journal.append("journal_rotated",
+                                    pruned=journal_pruned, kept=self.config.journal_max_events)
         rewards_applied = self.store.consume_meta_int("pending_reward_touches")
         rows = self.store.elig_drain()
         committed = pruned = 0
@@ -784,6 +976,7 @@ class Hippocampus:
             edges_pruned=pruned,
             promoted_to_semantic=len(promote_ids),
             rewards_applied=rewards_applied,
+            journal_pruned=journal_pruned,
             elapsed_ms=(_time.perf_counter() - t0) * 1000.0,
         )
         self.store.set_meta("last_consolidate_at", repr(now))

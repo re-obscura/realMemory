@@ -151,6 +151,13 @@ def tokenize(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text)]
 
 
+def search_tokens(text: str) -> set[str]:
+    """Токены, значимые для сопоставления запроса и следа: 1-символьные
+    отбрасываются синхронно с build_fts_query, иначе каналы определяют
+    «токен» по-разному и full_match ведёт себя несогласованно."""
+    return {t for t in tokenize(text) if len(t) > 1}
+
+
 def build_fts_query(text: str, max_terms: int = 12) -> str | None:
     """Выражение MATCH из токенов запроса: "tok1" OR "tok2" ..."""
     seen: dict[str, None] = {}
@@ -336,21 +343,34 @@ class MemoryStore:
             row = self._conn.execute("SELECT MAX(updated_at) FROM memories").fetchone()
         return None if row is None or row[0] is None else float(row[0])
 
-    def backup(self, dest_dir: str | Path | None = None, keep: int = 10) -> Path:
+    def backup(self, dest_dir: str | Path | None = None, keep: int = 10,
+               min_interval_s: float = 0.0) -> Path | None:
         """Консистентная копия базы через sqlite backup API + ротация.
 
         Копии складываются в <каталог базы>/backups/memory-<timestamp>.db;
         остаются последние `keep` штук (keep=0 — копия без ротации).
-        Возвращает путь свежей копии."""
+        min_interval_s > 0 включает троттлинг по wall-clock (метка
+        db_meta.last_backup_at): если с последней копии прошло меньше времени,
+        копия не делается и возвращается None — «сон» после каждого ответа
+        агента не обязан копировать всю базу.
+        """
+        now = time.time()
+        if min_interval_s > 0:
+            last = self.get_meta("last_backup_at")
+            if last is not None and (now - float(last)) < min_interval_s:
+                return None
         dest_dir = Path(dest_dir) if dest_dir else self.path.parent / "backups"
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / f"memory-{time.strftime('%Y%m%d-%H%M%S')}.db"
+        # миллисекунды в суффиксе: две консолидации в одну секунду не делят имя
+        stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{int(now * 1000) % 1000:03d}"
+        dest = dest_dir / f"memory-{stamp}.db"
         with self._lock:
             out = sqlite3.connect(str(dest))
             try:
                 self._conn.backup(out)
             finally:
                 out.close()
+        self.set_meta("last_backup_at", repr(float(now)))
         if keep > 0:
             olds = sorted(dest_dir.glob("memory-*.db"))
             for old in olds[:-keep]:
@@ -417,15 +437,26 @@ class MemoryStore:
         return [by_id[i] for i in ids if i in by_id]
 
     def iter_active(self, batch: int = 256) -> Iterator[MemoryRecord]:
-        cur = self._conn.execute(
-            f"SELECT {_COLS} FROM memories WHERE status=? ORDER BY id", (STATUS_ACTIVE,)
-        )
+        """Порционная итерация активных следов по курсору id.
+
+        Каждая порция читается под замком и материализуется до yield: открытый
+        курсор не удерживается между порциями, поэтому конкурентные мутации
+        (BEGIN IMMEDIATE/ROLLBACK того же соединения из другого треда MCP-сервера)
+        не рвут итерацию. Следы, вставленные после старта итерации, видны —
+        это скан «живого» состояния, а не снапшот.
+        """
+        last_id = 0
         while True:
-            rows = cur.fetchmany(batch)
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT {_COLS} FROM memories WHERE status=? AND id>? ORDER BY id LIMIT ?",
+                    (STATUS_ACTIVE, last_id, int(batch)),
+                ).fetchall()
             if not rows:
-                break
+                return
             for row in rows:
                 yield _row_to_record(row, self.dim)
+                last_id = int(row[0])
 
     def all_active_ids(self) -> np.ndarray:
         with self._lock:
@@ -693,15 +724,37 @@ class MemoryStore:
         return int(n)
 
     def iter_events(self) -> Iterator[dict]:
-        cur = self._conn.execute("SELECT ts, type, data FROM events ORDER BY seq")
+        """Порционная итерация журнала (замок на порцию — см. iter_active).
+        Внешняя форма события прежняя: {ts, type, **data}; seq используется
+        только как курсор и наружу не выдаётся."""
+        last_seq = 0
         while True:
-            rows = cur.fetchmany(256)
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT seq, ts, type, data FROM events WHERE seq>? ORDER BY seq LIMIT 256",
+                    (last_seq,),
+                ).fetchall()
             if not rows:
-                break
-            for ts, etype, data in rows:
+                return
+            for seq, ts, etype, data in rows:
+                last_seq = int(seq)
                 event = {"ts": float(ts), "type": etype}
                 event.update(json.loads(data))
                 yield event
+
+    def events_prune(self, keep_rows: int) -> int:
+        """Оставить последние `keep_rows` событий журнала; вернуть число удалённых.
+        keep_rows <= 0 трактуется как «ничего не удалять»."""
+        if keep_rows <= 0:
+            return 0
+        with self._txn() as con:
+            con.execute(
+                "DELETE FROM events WHERE seq NOT IN "
+                "(SELECT seq FROM events ORDER BY seq DESC LIMIT ?)",
+                (int(keep_rows),),
+            )
+            deleted = int(con.execute("SELECT changes()").fetchone()[0])
+        return deleted
 
     def gate_decisions(self) -> dict[str, int]:
         """Счётчики решений гейта из write-событий (устойчиво к рестартам процессов)."""

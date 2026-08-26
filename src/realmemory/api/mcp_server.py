@@ -194,6 +194,12 @@ def main(argv=None) -> None:
         default="local",
         help="эмбеддер: local = fastembed ONNX локально; hashing = детерминированный без модели",
     )
+    parser.add_argument("--units", type=int, default=None,
+                        help="n_units SDR-пространства; фиксируются базой при первом открытии")
+    parser.add_argument("--k-sparse", type=int, default=None,
+                        help="on-битов на SDR-паттерн")
+    parser.add_argument("--bucket-cap", type=int, default=None,
+                        help="горизонт вытеснения L1-бакета (palimpsest)")
     args = parser.parse_args(argv)
     from ..config import MemoryConfig
     from ..hippocampus import Hippocampus
@@ -207,7 +213,13 @@ def main(argv=None) -> None:
         # попадут в db_meta.config при первом открытии базы
         for key, val in profile.items():
             setattr(cfg, key, float(val))
-        cfg.validate()
+    if args.units is not None:
+        cfg.n_units = int(args.units)
+    if args.k_sparse is not None:
+        cfg.k_sparse = int(args.k_sparse)
+    if args.bucket_cap is not None:
+        cfg.bucket_cap = int(args.bucket_cap)
+    cfg.validate()
     hippo = Hippocampus.open(args.path, config=cfg, embedder=embedder,
                              namespace=args.namespace)
     default_project = resolve_project(args.project)
