@@ -159,13 +159,23 @@ pip install 'realmemory[team]'
 python -m realmemory.team status --path ./rm_data   # сводка по проектам
 python -m realmemory.team ui     --path ./rm_data   # интерактивный выбор (Textual)
 python -m realmemory.team policy                     # показать политику/путь
+python -m realmemory.team sync      --path ./rm_data  # доставить решения координатору
+python -m realmemory.team recall-team --path ./rm_data "запрос" [--author X]
+```
+
+Coordinator v0.7 — passive service on any team host, storing ONLY explicitly
+published items plus ephemeral presence:
+
+```bash
+REALMEMORY_TEAM_TOKEN=<shared-secret> python -m realmemory.team.coordinator --data ./coord_data --port 8400
+# затем в ~/.realmemory/team.yaml:  coordinator: http://<host>:8400
 ```
 
 A close fact recorded under a DIFFERENT author never reinforces that
 trace — it links instead, keeping both viewpoints attributable. Cross-process
 writes propagate through a `memories_rev` revision counter (volatile caches
-resync lazily at the next recall/remember). Network transport is the next
-stage; see [`docs/TEAM.md`](docs/TEAM.md).
+resync lazily at the next recall/remember). The MCP-tool `recall_team` exists only when the policy sets a
+coordinator. See [`docs/TEAM.md`](docs/TEAM.md).
 
 ## Observability ("how the memory behaves over time")
 

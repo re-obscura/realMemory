@@ -14,6 +14,16 @@ def _open_store(path: str):
     return _store_for(Path(path))
 
 
+def _policy_or_die(args):
+    from .identity import resolve_identity
+    from .policy import load_policy
+
+    policy = load_policy(args.policy_path)
+    if not policy.identity:
+        policy.identity = resolve_identity()
+    return policy
+
+
 def cmd_status(args) -> int:
     from . import registry as reg
     from .identity import resolve_identity
@@ -93,6 +103,60 @@ def cmd_ui(args) -> int:  # pragma: no cover - интерактивный реж
     return 0
 
 
+def cmd_sync(args) -> int:
+    from .sync import push
+
+    policy = _policy_or_die(args)
+    store = _open_store(args.path)
+    try:
+        summary = push(store, policy, timeout_s=args.timeout)
+    except Exception as exc:  # noqa: BLE001 - человекочитаемая причина
+        print(f"[realmemory] sync failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    line = (f"опубликовано {summary.published}, "
+            f"отзывов доставлено {summary.retracted}")
+    if summary.marked != summary.published + summary.retracted:
+        line += f" (помечено {summary.marked})"
+    if summary.content_lost:
+        line += f"; БЕЗ контента (след удалён локально): {summary.content_lost}"
+    print(line)
+    return 0 if not summary.content_lost else 2
+
+
+def cmd_recall_team(args) -> int:
+    from .recall_team import recall_team
+
+    try:
+        answer = recall_team(args.path, args.query, k=args.k,
+                             author=args.author or None,
+                             project=args.project or None,
+                             policy_path=args.policy_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[realmemory] recall_team failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({
+            "abstained": answer.abstained,
+            "max_age_s": answer.max_age_s,
+            "coordinator": answer.coordinator,
+            "online": answer.presence_online,
+            "hits": [vars(h) for h in answer.hits],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    who = ", ".join(answer.presence_online) or "(никого online)"
+    age = (f"самое свежее: {answer.max_age_s / 3600:.1f} ч назад"
+           if answer.max_age_s is not None else "")
+    print(f"coordinator {answer.coordinator} · online: {who} · {age}")
+    if answer.abstained:
+        print("в командном кэше по теме ничего нет")
+        return 0
+    for h in answer.hits:
+        print(f"[{h.score:.3f}] ({h.author}/{h.project}) {h.text}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="realmemory-team",
                                      description="командный слой realMemory")
@@ -117,6 +181,21 @@ def main(argv=None) -> int:
                     default="show")
     pl.add_argument("--policy-path", default=None)
     pl.set_defaults(fn=cmd_policy)
+
+    sy = sub.add_parser("sync",
+                        help="довести публикации/отзывы до координатора")
+    add_common(sy)
+    sy.add_argument("--timeout", type=float, default=4.0)
+    sy.set_defaults(fn=cmd_sync)
+
+    rt = sub.add_parser("recall-team", help="поиск по кэшу команды")
+    add_common(rt)
+    rt.add_argument("query")
+    rt.add_argument("--k", type=int, default=5)
+    rt.add_argument("--author", default=None)
+    rt.add_argument("--project", default=None)
+    rt.add_argument("--json", action="store_true")
+    rt.set_defaults(fn=cmd_recall_team)
 
     args = parser.parse_args(argv)
     return args.fn(args)

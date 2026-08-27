@@ -43,7 +43,7 @@ def test_fresh_db_is_v2_with_author_and_publications(tmp_path):
 
     store = MemoryStore(tmp_path / "m.db", dim=8)
     try:
-        assert store.schema_version == str(SCHEMA_VERSION) == "2"
+        assert store.schema_version == str(SCHEMA_VERSION) == "3"
         con = sqlite3.connect(str(tmp_path / "m.db"))
         cols = {r[1] for r in con.execute("PRAGMA table_info(memories)")}
         tables = {r[0] for r in con.execute(
@@ -75,7 +75,7 @@ def test_legacy_db_upgrades_to_v2(tmp_path):
 
     store = MemoryStore(db, dim=8)
     try:
-        assert store.schema_version == "2"
+        assert store.schema_version == "3"
     finally:
         store.close()
 

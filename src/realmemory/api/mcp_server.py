@@ -37,11 +37,23 @@ def _packet_to_dict(packet) -> dict[str, Any]:
         }
 
 
-def build_server(hippo, default_project: str | None = None):
+def build_server(hippo, default_project: str | None = None,
+                 team_root=None, team_policy_path=None):
     """Собрать FastMCP-сервер над фасадом. Требует пакет fastmcp (extra [mcp]).
 
     default_project — скоуп по умолчанию (обычно определён по рабочей директории);
-    явный аргумент project тула имеет приоритет."""
+    явный аргумент project тула имеет приоритет. team_root/team_policy_path:
+    если политика командного слоя настроена (coordinator задан), добавляется
+    тула recall_team; без настройки тул не существует — kill-switch."""
+    team_enabled = False
+    if team_root is not None:
+        try:
+            from ..team.policy import load_policy
+
+            _policy = load_policy(team_policy_path)
+            team_enabled = bool(_policy.coordinator)
+        except Exception:  # noqa: BLE001 - отсутствие команды ≠ сломанный сервер
+            team_enabled = False
     try:
         from fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - зависит от окружения
@@ -129,6 +141,33 @@ def build_server(hippo, default_project: str | None = None):
         res = hippo.update_fact(int(old_id), new_text)
         return json.dumps({"old_id": int(old_id), "new_id": res.memory_id},
                           ensure_ascii=False)
+
+    if team_enabled:
+        @mcp.tool()
+        def recall_team(query: str, k: int = 5, author: str | None = None,
+                        project: str | None = None) -> str:
+            """Search the TEAM memory cache (published by colleagues).
+
+            Use when the user explicitly asks what the team knows ("как это
+            решал Андрей", "что известно команде про X"). Data may be stale:
+            every hit carries author/project/published_at - always mention
+            the freshness ("опубликовано N часов/дней назад"). abstained=true
+            means nothing published on the topic - say so honestly.
+            """
+            import json as _json
+            from pathlib import Path as _Path
+
+            from ..team.recall_team import recall_team as _recall
+
+            answer = _recall(_Path(team_root), query, k=k, author=author,
+                             project=project or default_project,
+                             policy_path=team_policy_path)
+            return _json.dumps({
+                "abstained": answer.abstained,
+                "max_age_s": answer.max_age_s,
+                "online": answer.presence_online,
+                "hits": [vars(h) for h in answer.hits],
+            }, ensure_ascii=False)
 
     @mcp.tool()
     def introspect() -> str:
@@ -233,7 +272,19 @@ def main(argv=None) -> None:
     default_project = resolve_project(args.project)
     if default_project:
         print(f"[realmemory] project scope: {default_project}", flush=True)
-    build_server(hippo, default_project=default_project).run()
+    build_server(hippo, default_project=default_project,
+                 team_root=args.path,
+                 team_policy_path=_team_policy_path()).run()
+
+
+def _team_policy_path():
+    """Путь политики командного слоя; None → тулы команды не регистрируются."""
+    try:
+        from ..team.policy import DEFAULT_POLICY_PATH
+
+        return DEFAULT_POLICY_PATH
+    except Exception:  # noqa: BLE001
+        return None
 
 
 if __name__ == "__main__":  # pragma: no cover

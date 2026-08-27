@@ -106,13 +106,13 @@ def tombstoned_publications(store) -> list[PublicationRow]:
 
 
 def sync_status(store) -> dict:
-    """Наблюдаемость состояния синхронизации (сама сеть — будущий этап)."""
-    active = active_publications(store)
-    tombs = tombstoned_publications(store)
+    """Наблюдаемость registry: awaiting_sync — решения без подтверждения
+    сети; доставленные остаются в истории (active/tombstones)."""
+    unsynced = store.publications_unsynced()
     return {
-        "active": len(active),
-        "tombstones": len(tombs),
-        "awaiting_sync": len(active) + len(tombs),  # пока транспорта нет
+        "active": len(active_publications(store)),
+        "tombstones": len(tombstoned_publications(store)),
+        "awaiting_sync": len(unsynced),
     }
 
 

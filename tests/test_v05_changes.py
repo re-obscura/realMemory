@@ -261,7 +261,8 @@ def test_cli_geometry_flags_applied(monkeypatch, tmp_path):
     captured: dict = {}
     monkeypatch.setattr(projects_mod, "resolve_project", lambda explicit=None: None)
 
-    def fake_build_server(hippo, default_project=None):
+    def fake_build_server(hippo, default_project=None, team_root=None,
+                          team_policy_path=None):
         captured.update(units=hippo.config.n_units, k=hippo.config.k_sparse,
                         cap=hippo.config.bucket_cap, dim=hippo.config.dim)
         return _FakeSrv()
@@ -301,7 +302,7 @@ def test_schema_version_intact_for_v04_base(tmp_path):
     con.commit()
     con.close()
     store = MemoryStore(tmp_path / "m.db", dim=8)
-    assert store.get_meta("schema_version") == "2"
+    assert store.get_meta("schema_version") == "3"
     store.close()
 
 

@@ -32,7 +32,7 @@ from ..types import STATUS_ACTIVE, MemoryRecord
 # Версия схемы; растёт при несовместимых изменениях. Миграции выполняются
 # при открытии по цепочке от сохранённой версии, каждая мутация схемы
 # предваряется страховочной копией базы.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Цепочка миграций по целевым версиям. Индексы по колонкам, которых могло не
 # быть раньше, живут здесь и в быстром пути свежей схемы — не в базовом
@@ -59,7 +59,14 @@ _MIGRATION_V2 = (
     "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
 )
 
-_SCHEMA_CHAIN: list[tuple[int, tuple]] = [(1, _MIGRATION_V1), (2, _MIGRATION_V2)]
+_MIGRATION_V3 = (
+    "ALTER TABLE publications ADD COLUMN synced_at REAL",
+    "CREATE INDEX IF NOT EXISTS idx_publications_synced ON publications(synced_at)",
+)
+
+_SCHEMA_CHAIN: list[tuple[int, tuple]] = [
+    (1, _MIGRATION_V1), (2, _MIGRATION_V2), (3, _MIGRATION_V3),
+]
 
 
 def _is_duplicate_column(exc: sqlite3.OperationalError) -> bool:
@@ -169,10 +176,12 @@ _SCHEMA_STATEMENTS = (
         author TEXT NOT NULL DEFAULT '',
         published_at REAL NOT NULL,
         revoked_at REAL,
-        content_hash TEXT NOT NULL DEFAULT ''
+        content_hash TEXT NOT NULL DEFAULT '',
+        synced_at REAL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
+    "CREATE INDEX IF NOT EXISTS idx_publications_synced ON publications(synced_at)",
     "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
     """
     CREATE TABLE IF NOT EXISTS edges (
@@ -663,6 +672,33 @@ class MemoryStore:
 
     # -- рёбра L2 ---------------------------------------------------------------------
 
+    # -- синхронизация registry -------------------------------------------------
+
+    def publications_unsynced(self) -> list[tuple]:
+        """Строки registry, ещё не подтверждённые сетью (и активные, и
+        tombstones — отзыв тоже обязан доехать). Порядок по времени."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, trace_id, project, author, published_at,"
+                " revoked_at, content_hash FROM publications"
+                " WHERE synced_at IS NULL ORDER BY published_at"
+            ).fetchall()
+        return [tuple(r) for r in rows]
+
+    def publication_mark_synced(self, publication_ids, when: float) -> int:
+        ids = [str(i) for i in publication_ids]
+        if not ids:
+            return 0
+        ph = ",".join("?" * len(ids))
+        with self._txn() as con:
+            cur = con.execute(
+                f"UPDATE publications SET synced_at=? "
+                f"WHERE id IN ({ph}) AND synced_at IS NULL",
+                (float(when), *ids),
+            )
+            touched = int(cur.rowcount)
+        return touched
+
     def memories_rev(self) -> int:
         """Версия набора следов (вставки/правки/отзывы/забывание): дешёвая
         детекция чужих изменений для кэшей процесса — аналог edges_rev.
@@ -954,8 +990,8 @@ class MemoryStore:
                     continue
                 ph = ",".join("?" * len(params))
                 cur = con.execute(
-                    f"UPDATE publications SET revoked_at=? WHERE revoked_at IS NULL "
-                    f"AND {col} IN ({ph})",
+                    f"UPDATE publications SET revoked_at=?, synced_at=NULL "
+                    f"WHERE revoked_at IS NULL AND {col} IN ({ph})",
                     (float(now), *params),
                 )
                 touched += int(cur.rowcount)
