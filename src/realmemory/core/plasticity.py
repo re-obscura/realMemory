@@ -106,6 +106,10 @@ class EligibilityLog:
         self.tau = tau
         self._events = []
         for src, dst, strength, created_at, source_ids in state["events"]:
+            if float(strength) <= 0.0:
+                # негативный reward мог обнулить ещё незакоммиченное событие —
+                # оно отменено и ребра не даст; пропускаем вместо ошибки
+                continue
             self.add(np.asarray(src, dtype=np.int32), np.asarray(dst, dtype=np.int32),
                      float(strength), float(created_at), [int(i) for i in source_ids])
 

@@ -330,6 +330,30 @@ class MemoryStore:
                 (float(when), int(by_id), int(memory_id)),
             )
 
+    def forget_traces(self, memory_ids: Sequence[int]) -> int:
+        """Физическое удаление следов, забытых до потери осмысленности
+        (retention ниже recall-пола и grace без подкреплений).
+
+        Убирает строки memories (FTS-триггеры синхронно чистят индекс) и ссылки
+        elig_sources, чтобы reward-матчинг не бился о мёртвые id. Рёбра L2 живут
+        на уровне юнитов SDR и не атрибутируются по следам — они угасают сами.
+        Журнал событий сохраняется (аудит). Возвращает число удалённых строк."""
+        ids = sorted({int(i) for i in memory_ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        with self._txn() as con:
+            con.execute(
+                f"DELETE FROM elig_sources WHERE mem_id IN ({placeholders})", ids
+            )
+            con.executemany(
+                "DELETE FROM memories WHERE id=?", ((i,) for i in ids)
+            )
+            deleted = int(con.execute(
+                f"SELECT COUNT(*) FROM memories WHERE id IN ({placeholders})", ids
+            ).fetchone()[0])
+        return len(ids) - deleted
+
     def adjust_base(self, memory_id: int, base_strength: float, updated_at: float) -> None:
         """Ослабление следа без сброса таймера подкрепления (негативный feedback)."""
         with self._txn() as con:

@@ -138,6 +138,11 @@ concurrent "sleeps" are serialized by a transaction.
   stderr and leaves a `hook_error` event in the journal, visible in the report.
 - **Learning discipline**: the report shows reflect/recall — below ~0.1 the
   agent rarely grades recalled memories and decay/promotion run blind.
+- **Forgetting becomes literal**: traces whose retention fell below the
+  recall floor and stayed unreinforced longer than `gc_grace_below_floor_s`
+  are deleted at consolidation (rows, FTS index, eligibility links, caches);
+  negative feedback therefore shrinks the base instead of hoarding zombies.
+  Superseded history is kept by design.
 - **Project routing** is verified with one call — `introspect` shows the
   currently detected project.
 
@@ -197,7 +202,7 @@ default thresholds on real text merged almost everything into blobs — the
 calibration still lives in per-embedder profiles, and the gate-merge share
 is published rather than hidden inside the hit rate.
 
-Tests: **137 passed**.
+Tests: **142 passed**.
 
 ## Architecture
 

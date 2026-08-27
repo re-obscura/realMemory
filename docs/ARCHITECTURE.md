@@ -174,8 +174,16 @@ conflicting assemblies + LLM-judge during sleep) — phase 2.
    ones (lazy decay: effective weight is computed from the tick label and
    materialized only inside the consolidation transaction — O(E) once per
    sleep, not per write);
-3. scan episodes: promotion to semantic by the promotion rule;
-4. consolidation events plus a full metrics snapshot into the journal.
+3. single scan over active traces applies two fates: promotion to semantic by
+   the promotion rule, and garbage collection — traces whose retention fell
+   below `min_retention_recall` and stayed unreinforced longer than
+   `gc_grace_below_floor_s` are deleted for real (rows, FTS index via
+   triggers, eligibility source links, in-process caches). Grace protects a
+   dropped trace until it is clearly beyond surprise-resurrection (positive
+   feedback can still reinforce it inside the window); superseded history
+   never qualifies — its rows are kept by design;
+4. consolidation events plus a full metrics snapshot into the journal;
+   `forgotten_traces` joins the report.
 
 Note: links between a write and the first "sleep" exist only in the eligibility
 table and do not participate in the recall association wave (they commit during
@@ -349,9 +357,12 @@ integrity, v0.3 legacy migration, stdio-e2e MCP, operational guarantees).
   its own known ceiling (~98% coverage on weak-overlap queries regardless of
   budget) — closing that gap would need IDF-weighted votes or an embedding
   cache even larger than the exact-scan limit; deliberate trade, documented.
-- Negative feedback weakens traces toward forgetting but never deletes them:
-  retention-floor filtering hides them from recall while rows and their cache
-  slots stay until a future garbage-collection pass.
+- Negative feedback weakens traces below the recall floor fast; since v0.5.1
+  consolidations delete such long-forgotten rows after a grace period
+  (`gc_enabled`, `gc_grace_below_floor_s`), including cache slots and
+  eligibility links, so zombie growth is bounded. Superseded history and
+  L1 buckets' stale pointers are intentionally retained — the former is
+  revisable lineage, the latter self-evicts under palimpsest pressure.
 - No quantitative comparison against LLM-backed memory services yet
   (mem0/Zep/Letta): different trade-off axis — local, deterministic, zero-cost
   writes vs richer semantics through LLM extraction. A quality+cost harness is

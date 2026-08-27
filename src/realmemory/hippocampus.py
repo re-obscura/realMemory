@@ -908,7 +908,8 @@ class Hippocampus:
 
     def consolidate(self) -> ConsolidationReport:
         """«Сон»: выкачать eligibility в стабильные рёбра (с reward-усилением и
-        распадом), повысить дозревшие эпизоды до семантических, записать метрики.
+        распадом), повысить дозревшие эпизоды до семантических, удалить давно
+        забытые ниже recall-пола (после grace-периода), записать метрики.
         Всё состояние уже в БД, отдельного сохранения не требуется; параллельные
         консолидации других процессов сериализуются транзакцией."""
         t0 = _time.perf_counter()
@@ -960,10 +961,21 @@ class Hippocampus:
             )
         self._reload_network_cache()
 
+        # один проход по активным следам решает обе судьбы: дозревшие эпизоды
+        # повышаются до семантических, давно забытые ниже recall-пола удаляются
         promote_ids: list[int] = []
+        forgotten_ids: list[int] = []
+        grace_ok = now - self.config.gc_grace_below_floor_s
         for rec in self.store.iter_active():
             if should_promote(rec.kind, rec.reinforced_count, rec.created_at, now, self.config):
                 promote_ids.append(int(rec.id))
+            elif (
+                self.config.gc_enabled
+                and rec.last_reinforced_at <= grace_ok
+                and retention(rec.base_strength, rec.last_reinforced_at, now,
+                              rec.kind, self.config) < self.config.min_retention_recall
+            ):
+                forgotten_ids.append(int(rec.id))
         for rid in promote_ids:
             promoted_rec = self.store.get(rid)
             if promoted_rec is not None:
@@ -971,18 +983,48 @@ class Hippocampus:
                     rid, promoted_rec.base_strength, promoted_rec.reinforced_count,
                     promoted_rec.last_reinforced_at, kind=KIND_SEMANTIC,
                 )
+        if forgotten_ids:
+            self.store.forget_traces(forgotten_ids)
+            self._evict_forgotten(set(forgotten_ids))
+            self._trace_count = self.store.count()
         report = ConsolidationReport(
             edges_committed=committed,
             edges_pruned=pruned,
             promoted_to_semantic=len(promote_ids),
             rewards_applied=rewards_applied,
             journal_pruned=journal_pruned,
+            forgotten_traces=len(forgotten_ids),
             elapsed_ms=(_time.perf_counter() - t0) * 1000.0,
         )
         self.store.set_meta("last_consolidate_at", repr(now))
         self.journal.append("consolidate", **dataclasses.asdict(report))
         self.journal.append("metrics", **self.metrics_snapshot(now=now))
         return report
+
+    def _evict_forgotten(self, ids: set[int]) -> None:
+        """Вычистить удалённые следы из производных кэшей процесса.
+
+        Эмбеддинговый буфер уплотняется свопом с хвоста (O(1) на след, порядок
+        строк не сохраняется — рейтинги строятся на каждом recall заново).
+        L1-бакеты не трогаются: устаревшие указатели отбрасываются на чтении
+        (store.get → None), palimpsest вытеснит их под давлением ёмкости."""
+        for u in list(self._unit_index.keys()):
+            survivors = self._unit_index[u] - ids
+            if survivors:
+                self._unit_index[u] = survivors
+            else:
+                del self._unit_index[u]
+        for mid in ids:
+            pos = self._emb_pos.pop(mid, None)
+            if pos is None or pos >= self._emb_len:
+                continue
+            last = self._emb_len - 1
+            if pos != last:
+                self._emb_buf[pos] = self._emb_buf[last]
+                moved_id = int(self._idbuf[last])
+                self._idbuf[pos] = moved_id
+                self._emb_pos[moved_id] = pos
+            self._emb_len -= 1
 
     def metrics_snapshot(self, now: float | None = None) -> dict[str, Any]:
         """Полный срез состояния для анализа «со временем»: счётчики, гистерезис

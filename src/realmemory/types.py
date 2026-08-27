@@ -72,6 +72,7 @@ class ConsolidationReport:
     promoted_to_semantic: int = 0
     rewards_applied: int = 0
     journal_pruned: int = 0
+    forgotten_traces: int = 0
     elapsed_ms: float = 0.0
 
 

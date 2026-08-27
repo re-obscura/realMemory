@@ -45,11 +45,19 @@ class MemoryConfig:
     promote_after_reinforcements: int = 5
     promote_min_age_s: float = 60 * SECONDS_PER_DAY
 
-    # -- связи L2 (секунды) ---------------------------------------------------
+    # -- ссылки L2 (секунды) ---------------------------------------------------
     tau_eligibility: float = 14 * SECONDS_PER_DAY
     tau_edge_stable: float = 90 * SECONDS_PER_DAY
     edge_min_weight: float = 0.02
     max_pairs_per_bind: int = 256
+
+    # -- уборка забытого (GC) ----------------------------------------------------
+    # След с retention ниже min_retention_recall невидим для recall, но строка
+    # и кэш остаются. «Сон» удаляет такие строки, если без подкреплений прошло
+    # больше grace-периода: до этого след можно случайно воскресить
+    # (positive feedback / REINFORCE близнеца). Superseded-история не трогается.
+    gc_enabled: bool = True
+    gc_grace_below_floor_s: float = 14 * SECONDS_PER_DAY
 
     # -- эксплуатация -----------------------------------------------------------
     backups_keep: int = 10  # копий в <каталог базы>/backups перед каждым «сном»; 0 — выключить
@@ -102,6 +110,8 @@ class MemoryConfig:
             raise ValueError("требуется tau_semantic > tau_episodic > 0")
         if self.tau_eligibility <= 0 or self.tau_edge_stable <= 0:
             raise ValueError("tau_eligibility и tau_edge_stable должны быть положительными")
+        if self.gc_grace_below_floor_s <= 0:
+            raise ValueError("gc_grace_below_floor_s должен быть положительным")
         if not 0.0 <= self.w_votes <= 1.0:
             raise ValueError("w_votes должен быть в [0, 1]")
         if not 0.0 < self.initial_strength <= self.strength_cap <= 1.0:

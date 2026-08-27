@@ -1,13 +1,12 @@
 """Изменения v0.5: точный скан как основной ретривер, откат на голосование,
-журнал под замком и с ротацией, троттлинг бэкапов."""
-"""Изменения v0.5: точный скан как основной ретривер, откат на голосование,
-журнал под замком и с ротацией, троттлинг бэкапов."""
+журнал под замком и с ротацией, троттлинг бэкапов, уборка забытых следов."""
 import sqlite3
 
 import numpy as np
 
 from realmemory import Hippocampus, MemoryConfig
 from realmemory.store.sqlite_store import MemoryStore
+from realmemory.timeprov import FakeClock
 from realmemory.types import MemoryRecord
 
 
@@ -304,3 +303,158 @@ def test_schema_version_intact_for_v04_base(tmp_path):
     store = MemoryStore(tmp_path / "m.db", dim=8)
     assert store.get_meta("schema_version") == "1"
     store.close()
+
+
+# -- уборка забытых следов (GC) ------------------------------------------------------
+
+def _gc_cfg(**overrides) -> MemoryConfig:
+    fields = {
+        "dim": 256, "n_units": 512, "k_sparse": 48, "sdr_seed": 5,
+        "bucket_cap": 32,
+        "tau_episodic": 60 * 86400.0,
+        "tau_semantic": 600 * 86400.0,
+        "gc_grace_below_floor_s": 5 * 86400.0,
+    }
+    fields.update(overrides)
+    cfg = MemoryConfig(**fields)
+    cfg.validate()
+    return cfg
+
+
+def _open_gc(tmp_path, cfg, start=0.0):
+    clock = FakeClock(start=start) if hasattr(FakeClock, "start") else FakeClock()
+    return Hippocampus.open(tmp_path / "rm", config=cfg, clock=clock)
+
+
+def test_gc_deletes_zombies_keeps_reinforced(tmp_path):
+    h = _open_gc(tmp_path, _gc_cfg())
+    victim1 = h.remember("забытый факт корвекс kv901").memory_id
+    keeper = h.remember("живой факт plimso pt902").memory_id
+    victim2 = h.remember(
+        "ещё один забытый вендрик vf903", related_ids=[keeper]
+    ).memory_id
+    h.feedback([keeper], 1.0)
+    h.feedback([keeper], 1.0)
+
+    assert h.consolidate().forgotten_traces == 0
+    h.clock.advance(100 * 86400.0)  # ниже пола ещё не упал даже забытий
+    assert h.consolidate().forgotten_traces == 0
+    h.clock.advance(50 * 86400.0)   # 150d: слабые ниже пола, grace прошёл
+    rep = h.consolidate()
+    assert rep.forgotten_traces == 2
+    assert h.store.get(victim1) is None
+    assert h.store.get(victim2) is None
+    assert h.store.get(keeper) is not None
+
+    # выживший находится, свежая запись после уборки попадает в кэш и выдачу
+    packet = h.recall("живой факт plimso pt902", k=1)
+    assert [i.memory_id for i in packet.items] == [keeper]
+    post = h.remember("новый факт после уборки юбэкс nj904").memory_id
+    again = h.recall("новый факт после уборки юбэкс nj904", k=1)
+    assert [i.memory_id for i in again.items] == [post]
+    assert h._emb_len == 2
+
+    final_now = h.clock.now()
+    live = [(i.memory_id, round(i.confidence, 6))
+            for i in h.recall("факт", k=5, all_scopes=True).items]
+    h.close()
+
+    clock2 = FakeClock(start=final_now)
+    h2 = Hippocampus.open(tmp_path / "rm", config=_gc_cfg(), clock=clock2)
+    after = [(i.memory_id, round(i.confidence, 6))
+             for i in h2.recall("факт", k=5, all_scopes=True).items]
+    h2.close()
+    assert live == after
+
+
+def test_gc_respects_grace_after_negative_feedback(tmp_path):
+    """§8-сценарий буквально: негативный фидбек обнуляет след мгновенно,
+    но удаление ждёт grace со времени последнего подкрепления."""
+    cfg = _gc_cfg(tau_episodic=400 * 86400.0, initial_strength=0.06,
+                  promote_min_age_s=400 * 86400.0)
+    h = Hippocampus.open(tmp_path / "rm", config=cfg, clock=FakeClock())
+    try:
+        zombie = h.remember("неправильный вывод о архитектуре q901").memory_id
+        h.feedback([zombie], -0.9)  # base падает ниже recall-пола сразу
+        h.clock.advance(3 * 86400.0)  # меньше grace
+        assert h.consolidate().forgotten_traces == 0
+        assert h.store.get(zombie) is not None
+        h.clock.advance(4 * 86400.0)  # суммарно больше grace
+        rep = h.consolidate()
+        assert rep.forgotten_traces == 1
+        assert h.store.get(zombie) is None
+        assert h._emb_len == 0
+    finally:
+        h.close()
+
+
+def test_gc_disabled_leaves_everything(tmp_path):
+    cfg = _gc_cfg(gc_enabled=False)
+    h = Hippocampus.open(tmp_path / "rm", config=cfg, clock=FakeClock())
+    try:
+        lost = h.remember("забытый факт сорекс sx909").memory_id
+        h.feedback([lost], -1.0)
+        h.clock.advance(300 * 86400.0)
+        assert h.consolidate().forgotten_traces == 0
+        assert h.store.get(lost) is None if False else h.store.get(lost) is not None
+    finally:
+        h.close()
+
+
+def test_gc_never_touches_superseded_history(tmp_path):
+    """Superseded-строки исключены из GC-кандидатов по статусу; замена живёт,
+    пока её retention выше пола (горизонт и подкрепления подобраны так, чтобы
+    неотменённое забывание не вмешивалось в проверку)."""
+    h = _open_gc(tmp_path, _gc_cfg())
+    try:
+        old = h.remember("старая версия решения вудекс wo900").memory_id
+        fresh = h.update_fact(old, "новая версия решения вудекс wo900b").memory_id
+        for _ in range(3):  # base к потолку: на 120d retention держится над полом
+            h.feedback([fresh], 1.0)
+        h.clock.advance(120 * 86400.0)
+        rep = h.consolidate()
+        assert rep.forgotten_traces == 0
+        superseded_rec = h.store.get(old)
+        assert superseded_rec is not None
+        assert superseded_rec.status == "superseded"
+        assert h.store.get(fresh) is not None
+    finally:
+        h.close()
+
+
+def test_elig_sources_cleaned_by_forget(tmp_path):
+    """Ссылки elig_sources удалённых следов не дублируют reward-матчинг мусором."""
+    h = _open_gc(tmp_path, _gc_cfg(tau_episodic=400 * 86400.0,
+                                   initial_strength=0.06,
+                                   promote_min_age_s=400 * 86400.0))
+    try:
+        import sqlite3 as _sq
+        doomed = h.remember("связанный факт жрекс dj907").memory_id
+        anchor = h.remember("якорный факт анкор ak908").memory_id
+        h.link_memories([doomed, anchor])
+        con = _sq.connect(str(h.path / "memory.db"))
+        try:
+            before = con.execute(
+                "SELECT COUNT(*) FROM elig_sources WHERE mem_id=?", (doomed,)
+            ).fetchone()[0]
+            assert before > 0
+            # негативный фидбек валит base ниже recall-пола мгновенно;
+            # через grace консолидация обязана удалить след вместе со ссылками
+            h.feedback([doomed], -1.0)
+            h.clock.advance(6 * 86400.0)
+            rep = h.consolidate()
+            assert rep.forgotten_traces == 1
+            after = con.execute(
+                "SELECT COUNT(*) FROM elig_sources WHERE mem_id=?", (doomed,)
+            ).fetchone()[0]
+            assert after == 0
+            assert con.execute(
+                "SELECT COUNT(*) FROM memories WHERE id=?", (doomed,)
+            ).fetchone()[0] == 0
+            assert con.execute(
+                "SELECT COUNT(*) FROM memories WHERE id=?", (anchor,)
+            ).fetchone()[0] == 1
+        finally:
+            con.close()
+    finally:
+        h.close()

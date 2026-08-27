@@ -58,7 +58,7 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
 @dataclass(frozen=True) ConsolidationReport:
     edges_committed: int; edges_pruned: int
     promoted_to_semantic: int; rewards_applied: int
-    journal_pruned: int; elapsed_ms: float
+    journal_pruned: int; forgotten_traces: int; elapsed_ms: float
 
 @dataclass MemoryRecord:  # internal storage unit
     id, text, kind, status, meta,
@@ -88,7 +88,11 @@ recall/probe fall back to L1 voting; RAM cost of the cache is dim×4×traces),
 ranking (`w_votes, assoc_confidence_penalty, w_keyword`),
 operations (`backups_keep`: 0 disables pre-sleep copies;
 `backup_min_interval_s`: wall-clock throttle, 0 = copy every consolidated
-sleep; `journal_max_events`: 0 disables journal rotation).
+sleep; `journal_max_events`: 0 disables journal rotation),
+garbage collection (`gc_enabled`; `gc_grace_below_floor_s` > 0: at
+consolidation a trace below `min_retention_recall` unreinforced past the
+grace is deleted — rows, eligibility links and caches together;
+superseded history never qualifies).
 
 Factories: `MemoryConfig.dev()` — small sizes for tests/demos.
 `validate()` invariants: `theta_reinforce > theta_link > cos_min_recall`;
@@ -348,7 +352,9 @@ class Hippocampus:
         # force_new + mark_superseded(old→new); replacement inherits old scope
 
     def consolidate() -> ConsolidationReport     # all state already in the DB, nothing to save;
-                                                 # parallel sleeps serialize via transaction
+                                                 # parallel sleeps serialize via transaction;
+                                                 # deletes traces long below the recall floor
+                                                 # (forget_traces: rows + elig_sources + FTS sync)
     def stats() -> dict                          # global, computed from the DB: identical
                                                  # for every process at any moment
     def metrics_snapshot(now=None) -> dict       # slice for dream_log/reports
