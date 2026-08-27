@@ -261,3 +261,98 @@ def test_tui_headless_smoke(tmp_path):
         asyncio.run(scenario())
     finally:
         env.hippo.close()
+
+
+# -- novelty gate по авторам (спека §4) ----------------------------------------------
+
+def _open_authored(tmp_path, author):
+    return Hippocampus.open(tmp_path / "rm", config=_cfg(), clock=FakeClock(),
+                            author=author)
+
+
+def test_foreign_close_trace_downgrades_to_link(tmp_path):
+    """Близкий факт коллеги не усиливает чужой след: LINK вместо REINFORCE.
+    Проверка именно в конфигурации «второй инстанс открылся ДО записи»:
+    remember обязан подхватить чужие вставки через memories_rev-ресинк."""
+    h1 = _open_authored(tmp_path, "andrey")
+    h2 = _open_authored(tmp_path, "maxim")   # открыт заранее: кэш пока пуст
+    try:
+        res1 = h1.remember("для кэша моделей используется fastembed ONNX локально")
+        assert res1.memory_id == 1
+        res2 = h2.remember("для кэша моделей используется fastembed ONNX локально")
+        # чужой близкий след не усиливается: связываются две точки зрения
+        assert res2.decision.action.value == "link"
+        assert res2.created and res2.memory_id != res1.memory_id
+        a = h1.store.get(res1.memory_id)
+        b = h2.store.get(res2.memory_id)
+        assert a.author == "andrey" and b.author == "maxim"
+        # связь записана в eligibility и ждёт сна
+        assert h2.pending_eligibility > 0
+        events = [e for e in h2.store.iter_events() if e["type"] == "write"
+                  and e.get("author") == "maxim"]
+        assert any(e.get("author_gate_downgraded") for e in events)
+    finally:
+        h1.close(); h2.close()
+
+
+def test_same_author_still_reinforces(tmp_path):
+    h = _open_authored(tmp_path, "maxim")
+    try:
+        first = h.remember("пользователь предпочитает краткие ответы")
+        second = h.remember("пользователь предпочитает краткие ответы")
+        assert second.decision.action.value == "reinforce"
+        assert not second.created and second.memory_id == first.memory_id
+    finally:
+        h.close()
+
+
+def test_legacy_empty_author_reinforce_compat(tmp_path):
+    """Следы до командного слоя (без автора) усиливаются любым identity —
+    сохранение поведения личных баз."""
+    legacy = Hippocampus.open(tmp_path / "rm", config=_cfg(), clock=FakeClock())
+    mid = legacy.remember("проект использует PostgreSQL 16 с alembic").memory_id
+    legacy.close()
+
+    h = _open_authored(tmp_path, "mtrunov")
+    try:
+        again = h.remember("проект использует PostgreSQL 16 с alembic")
+        assert again.decision.action.value == "reinforce"
+        assert again.memory_id == mid
+    finally:
+        h.close()
+
+
+def test_identityless_writer_unchanged(tmp_path):
+    """Безличный режим (author='') ведёт себя исторически против авторских."""
+    authored = _open_authored(tmp_path, "olga")
+    authored.remember("читаем логи через journalctl -u service")
+    authored.close()
+    anon = Hippocampus.open(tmp_path / "rm", config=_cfg(), clock=FakeClock())
+    try:
+        res = anon.remember("читаем логи через journalctl -u service")
+        assert res.decision.action.value == "reinforce"
+    finally:
+        anon.close()
+
+
+def test_foreign_below_link_threshold_creates(tmp_path):
+    """Деградация вниз до CREATE, когда косинус между theta_link и
+    theta_reinforce — связывать почти-дубликат чужого автора нечестно."""
+    h1 = _open_authored(tmp_path, "andrey")
+    h2 = _open_authored(tmp_path, "maxim")
+    try:
+        r1 = h1.remember("архив отчётов лежит в s3 bucket weekly-dumps v2")
+        # текст ниже reinforce-порога hashing dim256, но выше link
+        r2 = h2.remember("отчёты архивируются weekly в s3 bucket dumps второй")
+        action = r2.decision.action.value
+        cos = r2.decision.best_cosine
+        cfg = _cfg()
+        if cfg.theta_reinforce > cos >= cfg.theta_link:
+            assert action == "link"   # естественный LINK без деградации
+        elif cos >= cfg.theta_reinforce:
+            assert action == "link"   # деградация REINFORCE -> LINK
+        else:
+            assert action == "create"
+        del r1
+    finally:
+        h1.close(); h2.close()

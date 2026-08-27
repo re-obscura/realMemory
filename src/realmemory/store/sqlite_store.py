@@ -399,6 +399,7 @@ class MemoryStore:
                     str(rec.author or ""),
                 ),
             )
+            self.bump_memories_rev(con)
             rowid = cur.lastrowid
         if rowid is None:  # pragma: no cover - не бывает после успешного INSERT
             raise StorageError("INSERT не вернул rowid")
@@ -421,6 +422,7 @@ class MemoryStore:
         params.append(int(memory_id))
         with self._txn() as con:
             con.execute(f"UPDATE memories SET {sets} WHERE id=?", params)
+            self.bump_memories_rev(con)
 
     def mark_superseded(self, memory_id: int, by_id: int, when: float) -> None:
         with self._txn() as con:
@@ -428,6 +430,7 @@ class MemoryStore:
                 "UPDATE memories SET status='superseded', valid_to=?, superseded_by=? WHERE id=?",
                 (float(when), int(by_id), int(memory_id)),
             )
+            self.bump_memories_rev(con)
 
     def forget_traces(self, memory_ids: Sequence[int]) -> int:
         """Физическое удаление следов, забытых до потери осмысленности
@@ -445,6 +448,7 @@ class MemoryStore:
             con.execute(
                 f"DELETE FROM elig_sources WHERE mem_id IN ({placeholders})", ids
             )
+            self.bump_memories_rev(con)
             con.executemany(
                 "DELETE FROM memories WHERE id=?", ((i,) for i in ids)
             )
@@ -460,6 +464,7 @@ class MemoryStore:
                 "UPDATE memories SET base_strength=?, updated_at=? WHERE id=?",
                 (float(base_strength), float(updated_at), int(memory_id)),
             )
+            self.bump_memories_rev(con)
 
     def max_updated_at(self) -> float | None:
         with self._lock:
@@ -657,6 +662,22 @@ class MemoryStore:
         return [(int(r), float(b)) for r, b in rows]
 
     # -- рёбра L2 ---------------------------------------------------------------------
+
+    def memories_rev(self) -> int:
+        """Версия набора следов (вставки/правки/отзывы/забывание): дешёвая
+        детекция чужих изменений для кэшей процесса — аналог edges_rev.
+        -1, пока счётчик не заводился (legacy-базы)."""
+        val = self.get_meta("memories_rev")
+        return int(val) if val is not None else -1
+
+    @staticmethod
+    def bump_memories_rev(con) -> None:
+        """Поднять счётчик ВНУТРИ текущей транзакции мутации следов."""
+        con.execute(
+            "INSERT INTO db_meta(key, value) VALUES('memories_rev','1') "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value=CAST(CAST(value AS INTEGER)+1 AS TEXT)"
+        )
 
     def edges_rev(self) -> int:
         """Версия рёбер: растёт при любой их мутации (инвалидация CSR-кэша фасада)."""

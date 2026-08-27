@@ -33,7 +33,7 @@ from .core.plasticity import EligibilityLog
 from .encoding.embedder import EmbeddingProvider, HashingEmbedder
 from .encoding.sdr import SDREncoder
 from .policies.decay import reinforce_values, retention, should_promote, weaken_value
-from .policies.novelty import gate
+from .policies.novelty import gate_for_author
 from .store.sqlite_store import MemoryStore, build_fts_query, search_tokens
 from .timeprov import SystemClock, TimeProvider
 from .types import (
@@ -135,6 +135,7 @@ class Hippocampus:
         self._unit_index: dict[int, set[int]] = {}
         self._edges_rev_seen = -1
         self._trace_count = self.store.count()
+        self._mem_rev_seen = self.store.memories_rev()
         # кэш эмбеддингов активных следов (точный скан): амортизированные буферы,
         # растут вдвое — вставка не копирует весь массив на каждом remember
         self._emb_cap = 0
@@ -320,6 +321,32 @@ class Hippocampus:
         })
         self._edges_rev_seen = self.store.edges_rev()
 
+    def _resync_traces_if_changed(self) -> None:
+        """Чужие процессы могли вставить/править/забыть следы: детект по
+        memories_rev и полная пересборка волатильных структур (L1-бакеты,
+        юнит-индекс, кэш эмбеддингов). Пересборка O(N), запускается только
+        при фактическом изменении версии."""
+        rev = self.store.memories_rev()
+        if rev == self._mem_rev_seen:
+            return
+        self.index = SDRVotingIndex(self.config.n_units,
+                                    bucket_cap=self.config.bucket_cap)
+        self._unit_index = {}
+        self._emb_len = 0
+        self._emb_pos.clear()
+        for rec in self.store.iter_active():
+            self.index.write(rec.sdr, int(rec.id))
+            for u in rec.sdr.tolist():
+                self._unit_index.setdefault(int(u), set()).add(int(rec.id))
+            self._cache_append(int(rec.id), rec.embedding)
+        self._trace_count = self.store.count(status=STATUS_ACTIVE)
+        self._mem_rev_seen = rev
+
+    def _refresh_rev_marker(self) -> None:
+        """После СОБСТВЕННОЙ мутации следа счётчик уже поднят той же
+        транзакцией — фиксируем значение, чтобы не пересобирать кэш зря."""
+        self._mem_rev_seen = self.store.memories_rev()
+
     def _sync_network_cache(self) -> None:
         """Чужие процессы могли доконсолидировать рёбра — обновляем кэш по версии."""
         if self.store.edges_rev() != self._edges_rev_seen:
@@ -470,6 +497,7 @@ class Hippocampus:
         for u in np.asarray(sdr).tolist():
             self._unit_index.setdefault(int(u), set()).add(mid)
         self._cache_append(mid, rec.embedding)
+        self._refresh_rev_marker()
         return mid
 
     def _sample_pairs(self, ua: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -538,11 +566,25 @@ class Hippocampus:
             if rec is None:
                 raise KeyError(f"related_id {rid} не существует")
             known[rid] = rec
+        self._resync_traces_if_changed()
         now = float(when) if when is not None else float(self.clock.now())
         emb, sdr = self._encode(text)
         best_id, best_cos, near_ids = self._probe(emb, sdr, scope=scope, text=text)
 
-        action = DecisionAction.CREATE if force_new else gate(best_cos, self.config)
+        # командное правило: близкая запись другого автора не усиливает чужой
+        # след (REINFORCE -> LINK/CREATE), обе точки зрения остаются различимы
+        same_author: bool | None = None
+        if self.author and best_id is not None:
+            target_rec = self.store.get(best_id)
+            if target_rec is not None and target_rec.author:
+                same_author = target_rec.author == self.author
+        action = (DecisionAction.CREATE if force_new
+                  else gate_for_author(best_cos, self.config,
+                                       same_author=same_author))
+        downgraded = (action is not DecisionAction.REINFORCE
+                      and same_author is False
+                      and not force_new
+                      and best_cos >= self.config.theta_reinforce)
         target = best_id if action is DecisionAction.REINFORCE else None
         link_ids: tuple[int, ...] = ()
         if action is DecisionAction.LINK and best_id is not None and best_cos >= self.config.theta_link:
@@ -574,7 +616,9 @@ class Hippocampus:
             created = True
 
         self.journal.append("write", id=mid, kind=kind, action=action.value,
-                            created=created, chars=len(text), scope=scope, t=now)
+                            created=created, chars=len(text), scope=scope,
+                            author=self.author or None,
+                            author_gate_downgraded=bool(downgraded), t=now)
         return WriteResult(memory_id=mid, decision=decision, created=created)
 
     def _sdr_of(self, memory_id: int) -> np.ndarray:
@@ -633,6 +677,7 @@ class Hippocampus:
         """Поиск по памяти. scope='<проект>' видит следы проекта и global;
         scope=None или all_scopes=True — вся память без фильтра."""
         t0 = _time.perf_counter()
+        self._resync_traces_if_changed()
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query должен быть непустой строкой")
         if k < 1:
@@ -904,6 +949,7 @@ class Hippocampus:
             elif reward < 0.0:
                 self.store.adjust_base(i, weaken_value(rec.base_strength, reward), now)
                 weakened += 1
+        self._refresh_rev_marker()
         self.journal.append(
             "feedback",
             ids=list(uniq),
@@ -995,6 +1041,7 @@ class Hippocampus:
             self.store.forget_traces(forgotten_ids)
             self._evict_forgotten(set(forgotten_ids))
             self._trace_count = self.store.count()
+            self._refresh_rev_marker()
         report = ConsolidationReport(
             edges_committed=committed,
             edges_pruned=pruned,

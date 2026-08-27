@@ -161,8 +161,11 @@ python -m realmemory.team ui     --path ./rm_data   # интерактивный
 python -m realmemory.team policy                     # показать политику/путь
 ```
 
-Network transport (coordinator presence/cache) is the next stage; until then
-`publish` records decisions locally only. See [`docs/TEAM.md`](docs/TEAM.md).
+A close fact recorded under a DIFFERENT author never reinforces that
+trace — it links instead, keeping both viewpoints attributable. Cross-process
+writes propagate through a `memories_rev` revision counter (volatile caches
+resync lazily at the next recall/remember). Network transport is the next
+stage; see [`docs/TEAM.md`](docs/TEAM.md).
 
 ## Observability ("how the memory behaves over time")
 
@@ -220,7 +223,7 @@ default thresholds on real text merged almost everything into blobs — the
 calibration still lives in per-embedder profiles, and the gate-merge share
 is published rather than hidden inside the hit rate.
 
-Tests: **152 passed**.
+Tests: **157 passed**.
 
 ## Architecture
 

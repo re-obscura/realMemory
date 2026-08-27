@@ -320,6 +320,10 @@ class Hippocampus:
                  force_new=False, related_ids: Sequence[int] = (),
                  scope: str = SCOPE_GLOBAL) -> WriteResult
         # the gate compares text only within its scope + global;
+        # author-aware rule: a close trace by a DIFFERENT author degrades
+        # REINFORCE to LINK (both viewpoints stay distinct); empty authors on
+        # either side keep the historical behaviour;
+
         # ValueError on blank text, unknown kind, invalid scope;
         # KeyError when a related_ids id does not exist
 
@@ -386,6 +390,8 @@ def main(argv=None):                    # CLI: --path, --namespace, --project, -
 ```
 
 Tools (names are cognitive actions, descriptions in English):
+recall/remember resync volatile caches when `memories_rev` bumps —
+foreign-process writes become visible without reopen ·
 `recall(query, k, include_superseded, project)` ·
 `memorize(text, kind, related_ids, project)` ·
 `reflect(memory_ids, reward)` → `{touched}` · `revise(old_id, new_text)` ·

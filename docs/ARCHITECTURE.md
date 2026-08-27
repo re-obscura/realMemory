@@ -95,7 +95,10 @@ exact scan (default) → global cosine ranking → prefix with cos ≥ θ_link
   (voting fallback on huge corpora: SDRVotingIndex.query + FTS5 tokens)
 → candidates → exact cosine rerank over embeddings → best_cosine
 Novelty gate (probe sees only this scope + global):
-   best_cos ≥ θ_reinforce → REINFORCE (bump base_strength, counter, timer;
+   best_cos ≥ θ_reinforce → REINFORCE, unless the target trace has a
+                             different non-empty author: then degrade to
+                             LINK (multi-author protection, team layer);
+                             (bump base_strength, counter, timer;
                              enough reinforcements+age ⇒ semantic status,
                              decay τ ×12 — mechanical semantization)
    best_cos ≥ θ_link      → CREATE + plastic links to active traces
