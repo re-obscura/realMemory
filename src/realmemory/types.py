@@ -55,6 +55,7 @@ class RecalledMemory:
     updated_at: float
     meta: dict[str, Any]
     scope: str = SCOPE_GLOBAL
+    author: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,3 +97,4 @@ class MemoryRecord:
     valid_to: float | None = None
     superseded_by: int | None = None
     scope: str = SCOPE_GLOBAL  # 'global' или имя проекта; recall видит свой проект + global
+    author: str = ""  # кто записал; пусто для следов, созданных до v0.5.2

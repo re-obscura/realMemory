@@ -81,10 +81,14 @@ def test_backup_keep_zero_disables_rotation(tmp_path):
 
 def test_schema_version_recorded(tmp_path):
     store = MemoryStore(tmp_path / "m.db", dim=8)
-    assert store.get_meta("schema_version") == "1"
+    assert store.get_meta("schema_version") == "2"
     # повторное открытие не понижает версию
     reopened = MemoryStore(tmp_path / "m.db", dim=8)
-    assert reopened.get_meta("schema_version") == "1"
+    assert reopened.get_meta("schema_version") == "2"
+    # v1 -> v2: колонка author и registry публикаций на месте
+    assert {"author", "scope"} <= {
+        r[1] for r in sqlite3.connect(str(tmp_path / "m.db")).execute(
+            "PRAGMA table_info(memories)").fetchall()}
     reopened.close()
     store.close()
 

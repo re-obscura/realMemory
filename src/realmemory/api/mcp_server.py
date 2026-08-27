@@ -14,26 +14,27 @@ from typing import Any
 
 
 def _packet_to_dict(packet) -> dict[str, Any]:
-    return {
-        "query": packet.query,
-        "abstained": packet.abstained,
-        "latency_ms": round(packet.latency_ms, 2),
-        "items": [
-            {
-                "id": it.memory_id,
-                "text": it.text,
-                "kind": it.kind,
-                "cosine": it.cosine,
-                "confidence": it.confidence,
-                "retention": it.retention,
-                "source": it.source,
-                "scope": it.scope,
-                "created_at": it.created_at,
-                "meta": dict(it.meta),
-            }
-            for it in packet.items
-        ],
-    }
+        return {
+            "query": packet.query,
+            "abstained": packet.abstained,
+            "latency_ms": round(packet.latency_ms, 2),
+            "items": [
+                {
+                    "id": it.memory_id,
+                    "text": it.text,
+                    "kind": it.kind,
+                    "cosine": it.cosine,
+                    "confidence": it.confidence,
+                    "retention": it.retention,
+                    "source": it.source,
+                    "scope": it.scope,
+                    "author": it.author,
+                    "created_at": it.created_at,
+                    "meta": dict(it.meta),
+                }
+                for it in packet.items
+            ],
+        }
 
 
 def build_server(hippo, default_project: str | None = None):
@@ -220,8 +221,15 @@ def main(argv=None) -> None:
     if args.bucket_cap is not None:
         cfg.bucket_cap = int(args.bucket_cap)
     cfg.validate()
+    identity = ""
+    try:
+        from ..team.identity import resolve_identity
+
+        identity = resolve_identity()
+    except Exception:  # noqa: BLE001 - идентичность не должна ломать запуск
+        identity = ""
     hippo = Hippocampus.open(args.path, config=cfg, embedder=embedder,
-                             namespace=args.namespace)
+                             namespace=args.namespace, author=identity)
     default_project = resolve_project(args.project)
     if default_project:
         print(f"[realmemory] project scope: {default_project}", flush=True)

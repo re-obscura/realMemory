@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "realmemory"
-version = "0.5.1"
+version = "0.5.2"
 description = "Persistent memory layer for LLM agents: exact-scan hybrid retrieval, associative assembly network, novelty-gated writes, trace decay, sleep-time consolidation."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["fastmcp>=2.0", "mcp>=1.10"]
+# командный слой: TUI публикаций (network-транспорт добавится позже)
+team = ["textual>=2,<3", "rich>=13", "pyyaml>=6"]
 # пин по минору: смена версии fastembed меняет пулинг/векторы той же модели
 local = ["fastembed>=0.8,<0.9"]
 dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]

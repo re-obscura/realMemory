@@ -96,12 +96,16 @@ class Hippocampus:
         clock: TimeProvider | None = None,
         namespace: str | None = None,
         verify_embedder: bool = True,
+        author: str = "",
     ) -> None:
         self.config = config or MemoryConfig.dev()
         self.config.validate()
         self.path = _resolve_root(path, namespace)
         self.path.mkdir(parents=True, exist_ok=True)
         self.clock = clock or SystemClock()
+        # кто записывает через этот инстанс; попадает в каждую новую запись
+        # (командный слой, атрибуция). Пусто для безличных/тестовых сценариев.
+        self.author = str(author or "").strip()
         self.embedder = embedder or HashingEmbedder(dim=self.config.dim)
         if self.embedder.dim != self.config.dim:
             raise ValueError(
@@ -152,9 +156,11 @@ class Hippocampus:
         clock: TimeProvider | None = None,
         namespace: str | None = None,
         verify_embedder: bool = True,
+        author: str = "",
     ) -> Hippocampus:
         return cls(path, config=config, embedder=embedder, clock=clock,
-                   namespace=namespace, verify_embedder=verify_embedder)
+                   namespace=namespace, verify_embedder=verify_embedder,
+                   author=author)
 
     def close(self) -> None:
         self.store.close()
@@ -440,7 +446,7 @@ class Hippocampus:
         return rec_scope == scope or rec_scope == SCOPE_GLOBAL
 
     def _insert_memory(self, text, kind, meta, now, emb, sdr,
-                       scope: str = SCOPE_GLOBAL) -> int:
+                       scope: str = SCOPE_GLOBAL, author: str | None = None) -> int:
         rec = MemoryRecord(
             id=None,
             text=text,
@@ -456,6 +462,7 @@ class Hippocampus:
             base_strength=float(self.config.initial_strength),
             valid_from=now,
             scope=scope,
+            author=(self.author if author is None else str(author).strip()),
         )
         mid = self.store.insert(rec)
         self._trace_count += 1
@@ -852,6 +859,7 @@ class Hippocampus:
                 updated_at=rec.updated_at,
                 meta=dict(rec.meta),
                 scope=rec.scope,
+                author=rec.author,
             )
             for c, cos, ret, rec, source in items
         )

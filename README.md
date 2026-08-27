@@ -146,6 +146,24 @@ concurrent "sleeps" are serialized by a transaction.
 - **Project routing** is verified with one call — `introspect` shows the
   currently detected project.
 
+## Team sharing (preview)
+
+Personal memory stays fully local by default. On top of it, an explicit
+sharing layer is growing: every publication is a deliberate act recorded in a
+local registry (with tombstones for retractions), and `~/.realmemory/team.yaml`
+declares *what may* leave the machine; never-rules work fail-closed even
+against explicit requests without `--force`.
+
+```bash
+pip install 'realmemory[team]'
+python -m realmemory.team status --path ./rm_data   # сводка по проектам
+python -m realmemory.team ui     --path ./rm_data   # интерактивный выбор (Textual)
+python -m realmemory.team policy                     # показать политику/путь
+```
+
+Network transport (coordinator presence/cache) is the next stage; until then
+`publish` records decisions locally only. See [`docs/TEAM.md`](docs/TEAM.md).
+
 ## Observability ("how the memory behaves over time")
 
 Every event is appended to the journal inside the database: writes, recalls
@@ -202,7 +220,7 @@ default thresholds on real text merged almost everything into blobs — the
 calibration still lives in per-embedder profiles, and the gate-merge share
 is published rather than hidden inside the hit rate.
 
-Tests: **142 passed**.
+Tests: **152 passed**.
 
 ## Architecture
 

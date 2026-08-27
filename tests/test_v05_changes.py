@@ -301,7 +301,7 @@ def test_schema_version_intact_for_v04_base(tmp_path):
     con.commit()
     con.close()
     store = MemoryStore(tmp_path / "m.db", dim=8)
-    assert store.get_meta("schema_version") == "1"
+    assert store.get_meta("schema_version") == "2"
     store.close()
 
 

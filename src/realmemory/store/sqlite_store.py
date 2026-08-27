@@ -20,6 +20,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,8 +30,112 @@ import numpy as np
 from ..types import STATUS_ACTIVE, MemoryRecord
 
 # Версия схемы; растёт при несовместимых изменениях. Миграции выполняются
-# при открытии, перед изменением схемы делается автоматический бэкап.
-SCHEMA_VERSION = 1
+# при открытии по цепочке от сохранённой версии, каждая мутация схемы
+# предваряется страховочной копией базы.
+SCHEMA_VERSION = 2
+
+# Цепочка миграций по целевым версиям. Индексы по колонкам, которых могло не
+# быть раньше, живут здесь и в быстром пути свежей схемы — не в базовом
+# CREATE-скрипте, иначе он ломает открытие унаследованных баз.
+_MIGRATION_V1 = (
+    "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
+    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
+)
+
+_MIGRATION_V2 = (
+    "ALTER TABLE memories ADD COLUMN author TEXT NOT NULL DEFAULT ''",
+    """
+    CREATE TABLE IF NOT EXISTS publications (
+        id TEXT PRIMARY KEY,
+        trace_id INTEGER NOT NULL,
+        project TEXT NOT NULL DEFAULT '',
+        author TEXT NOT NULL DEFAULT '',
+        published_at REAL NOT NULL,
+        revoked_at REAL,
+        content_hash TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memories_author ON memories(author)",
+    "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
+)
+
+_SCHEMA_CHAIN: list[tuple[int, tuple]] = [(1, _MIGRATION_V1), (2, _MIGRATION_V2)]
+
+
+def _is_duplicate_column(exc: sqlite3.OperationalError) -> bool:
+    return "duplicate column name" in str(exc).lower()
+
+
+def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
+                    backup_factory) -> str:
+    """Довести схему до SCHEMA_VERSION по цепочке миграций.
+
+    Свежая база рождается с полной схемой и получает метку версии без мутаций;
+    унаследованные проходят недостающие шаги, каждой мутации предшествует
+    страховочная копия (после успешного шага). Повторный запуск частично
+    обновлённой базы терпит «колонка уже существует». Возвращает версию."""
+    with lock:
+        row = conn.execute(
+            "SELECT value FROM db_meta WHERE key='schema_version'"
+        ).fetchone()
+        stored = int(row[0]) if row else None
+
+    def mark(target: int) -> None:
+        with lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(target),),
+                )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
+    if stored == SCHEMA_VERSION:
+        return str(SCHEMA_VERSION)
+    if stored is None:
+        with lock:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(memories)").fetchall()}
+            complete = "author" in cols and bool(conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='publications'").fetchone())
+        if complete:
+            mark(SCHEMA_VERSION)
+            return str(SCHEMA_VERSION)
+        # базы до появления нумерации: наличие scope отличает v0.3+ от v0.2-
+        stored = 1 if "scope" in cols else 0
+
+    version = max(stored, 0)
+    for target, statements in _SCHEMA_CHAIN:
+        if version >= target:
+            continue
+        backup_factory()
+        with lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for stmt in statements:
+                    try:
+                        conn.execute(stmt)
+                    except sqlite3.OperationalError as exc:
+                        if not (_is_duplicate_column(exc)
+                                and stmt.lstrip().upper().startswith("ALTER")):
+                            raise
+                # версия фиксируется той же транзакцией, что и DDL: атомарно
+                conn.execute(
+                    "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(target),),
+                )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            version = target
+    return str(version)
 
 # Схема списком стейтментов: executescript() внутри BEGIN не годится
 # (он неявно коммитит транзакцию).
@@ -52,10 +157,23 @@ _SCHEMA_STATEMENTS = (
         valid_from REAL NOT NULL,
         valid_to REAL,
         superseded_by INTEGER,
-        scope TEXT NOT NULL DEFAULT 'global'
+        scope TEXT NOT NULL DEFAULT 'global',
+        author TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS publications (
+        id TEXT PRIMARY KEY,
+        trace_id INTEGER NOT NULL,
+        project TEXT NOT NULL DEFAULT '',
+        author TEXT NOT NULL DEFAULT '',
+        published_at REAL NOT NULL,
+        revoked_at REAL,
+        content_hash TEXT NOT NULL DEFAULT ''
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
+    "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
     """
     CREATE TABLE IF NOT EXISTS edges (
         key INTEGER PRIMARY KEY,
@@ -98,12 +216,12 @@ _SCHEMA_STATEMENTS = (
 _INSERT_SQL = (
     "INSERT INTO memories(text,kind,status,meta,embedding,sdr,"
     "created_at,updated_at,reinforced_count,last_reinforced_at,base_strength,"
-    "valid_from,valid_to,superseded_by,scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "valid_from,valid_to,superseded_by,scope,author) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 _COLS = (
     "id,text,kind,status,meta,embedding,sdr,created_at,updated_at,"
-    "reinforced_count,last_reinforced_at,base_strength,valid_from,valid_to,superseded_by,scope"
+    "reinforced_count,last_reinforced_at,base_strength,valid_from,valid_to,superseded_by,scope,author"
 )
 
 
@@ -181,7 +299,7 @@ def _pack_i32(v: np.ndarray) -> bytes:
 
 def _row_to_record(row: tuple, dim: int) -> MemoryRecord:
     (rid, text, kind, status, meta_json, emb_b, sdr_b, created, updated,
-     rcount, rlast, base, vfrom, vto, sby, scope) = row
+     rcount, rlast, base, vfrom, vto, sby, scope, author) = row
     return MemoryRecord(
         id=int(rid),
         text=text,
@@ -199,6 +317,7 @@ def _row_to_record(row: tuple, dim: int) -> MemoryRecord:
         valid_to=None if vto is None else float(vto),
         superseded_by=None if sby is None else int(sby),
         scope=str(scope),
+        author=str(author or ""),
     )
 
 
@@ -218,32 +337,11 @@ class MemoryStore:
             with self._txn() as con:
                 for stmt in _SCHEMA_STATEMENTS:
                     con.execute(stmt)
-            # миграция баз, созданных до появления scope; индекс строго после
-            # гарантии колонки — иначе на legacy-базе нет такого столбца.
-            # Изменению схемы всегда предшествует страховочная копия.
-            with self._lock:
-                cols = {
-                    r[1] for r in self._conn.execute(
-                        "PRAGMA table_info(memories)"
-                    ).fetchall()
-                }
-            scope_missing = "scope" not in cols
-            if scope_missing:
-                self.backup()
-            with self._txn() as con:
-                if scope_missing:
-                    con.execute(
-                        "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL "
-                        "DEFAULT 'global'"
-                    )
-                con.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)"
-                )
-                con.execute(
-                    "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO NOTHING",
-                    (str(SCHEMA_VERSION),),
-                )
+            # миграции цепочкой до SCHEMA_VERSION (v2: author + publications);
+            # каждой мутации схемы предшествует страховочная копия базы
+            self._schema_version = _migrate_schema(
+                self._conn, self._lock, lambda: self.backup()
+            )
             self._fts_error: str | None = None
             try:
                 with self._txn() as con:
@@ -298,6 +396,7 @@ class MemoryStore:
                     None if rec.valid_to is None else float(rec.valid_to),
                     rec.superseded_by,
                     str(rec.scope or "global"),
+                    str(rec.author or ""),
                 ),
             )
             rowid = cur.lastrowid
@@ -542,7 +641,6 @@ class MemoryStore:
     def fts_enabled(self) -> bool:
         return getattr(self, "_fts_enabled", False)
 
-    @property
     def fts_error(self) -> str | None:
         return getattr(self, "_fts_error", None)
 
@@ -797,3 +895,65 @@ class MemoryStore:
                 "FROM events WHERE type='recall'"
             ).fetchone()
         return int(row[0]), round(float(row[1]), 3)
+
+    @property
+    def schema_version(self) -> str:
+        return str(getattr(self, "_schema_version", SCHEMA_VERSION))
+
+    # -- командный слой: registry публикаций ----------------------------------------
+
+    def publication_add(self, trace_id: int, project: str, author: str,
+                        published_at: float, content_hash: str) -> str:
+        """Зарегистрировать публикацию следа; возвращает publication_id.
+        Отзыв — отдельная запись с revoked_at; повторная публикация того же
+        следа создаёт новую строку (история решении сохраняется)."""
+        pid = uuid.uuid4().hex
+        with self._txn() as con:
+            con.execute(
+                "INSERT INTO publications(id, trace_id, project, author,"
+                " published_at, revoked_at, content_hash) VALUES(?,?,?,?,?,?,?)",
+                (pid, int(trace_id), str(project or ""), str(author or ""),
+                 float(published_at), None, str(content_hash)),
+            )
+        return pid
+
+    def publication_retract(self, now: float,
+                            publication_ids: Sequence[str] = (),
+                            trace_ids: Sequence[int] = ()) -> int:
+        """Поставить tombstone на активные публикации указанных id либо следов."""
+        pub_ids = [str(i) for i in publication_ids if str(i)]
+        tr_ids = [int(i) for i in trace_ids]
+        touched = 0
+        with self._txn() as con:
+            for group, col, params in (
+                ("id", "id", pub_ids),
+                ("trace_id", "trace_id", tr_ids),
+            ):
+                if not params:
+                    continue
+                ph = ",".join("?" * len(params))
+                cur = con.execute(
+                    f"UPDATE publications SET revoked_at=? WHERE revoked_at IS NULL "
+                    f"AND {col} IN ({ph})",
+                    (float(now), *params),
+                )
+                touched += int(cur.rowcount)
+        return touched
+
+    def publications_active(self) -> list[tuple]:
+        """Активные (не отозванные) публикации в хронологическом порядке."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, trace_id, project, author, published_at, content_hash "
+                "FROM publications WHERE revoked_at IS NULL ORDER BY published_at"
+            ).fetchall()
+        return [tuple(r) for r in rows]
+
+    def publications_tombstones(self) -> list[tuple]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, trace_id, project, author, published_at, revoked_at "
+                "FROM publications WHERE revoked_at IS NOT NULL "
+                "ORDER BY revoked_at"
+            ).fetchall()
+        return [tuple(r) for r in rows]
