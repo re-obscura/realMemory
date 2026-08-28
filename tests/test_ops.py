@@ -111,7 +111,8 @@ def test_hook_failure_visible_in_stderr(tmp_path, capsys):
     from realmemory.hook_cli import main as hook_main
 
     blocker = tmp_path / "notadir"
-    blocker.write_text("занято файлом")
+    # encoding явный: без него на cp1252-локали Windows кириллица падает
+    blocker.write_text("занято файлом", encoding="utf-8")
     with pytest.raises(SystemExit) as e:
         hook_main(["brief", "--path", str(blocker)])
     assert e.value.code == 0
