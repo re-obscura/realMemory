@@ -161,6 +161,9 @@ python -m realmemory.team ui     --path ./rm_data   # интерактивный
 python -m realmemory.team policy                     # показать политику/путь
 python -m realmemory.team sync      --path ./rm_data  # доставить решения координатору
 python -m realmemory.team recall-team --path ./rm_data "запрос" [--author X]
+
+# живой peer-endpoint участника (presence + ответы только по публикациям):
+python -m realmemory.team serve --path ./rm_data --host 0.0.0.0 --port 8410
 ```
 
 Coordinator v0.7 — passive service on any team host, storing ONLY explicitly
