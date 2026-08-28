@@ -241,7 +241,19 @@ def _report_hook_error(args, exc: BaseException) -> None:
         pass
 
 
+def _force_utf8_streams() -> None:
+    """Хуки говорят с клиентом по пайпам: на Windows кодировка пайпа — ANSI
+    (cp1252 и т.п.), и кириллица в брифе/ошибке падает UnicodeEncodeError.
+    Контракт вывода — UTF-8, так что выставляем его принудительно."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass  # не-TextIO обёртки (capture, редкие пайпы) — оставляем как есть
+
+
 def main(argv=None) -> None:
+    _force_utf8_streams()
     parser = argparse.ArgumentParser(prog="realmemory-hooks")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

@@ -3,6 +3,7 @@
 import sqlite3
 
 import numpy as np
+import pytest
 
 from realmemory import Hippocampus, MemoryConfig
 from realmemory.store.sqlite_store import MemoryStore
@@ -106,7 +107,10 @@ def test_results_stable_across_reopen(tmp_path, tiny_cfg):
     h2 = Hippocampus.open(tmp_path / "rm", config=tiny_cfg)
     after = [(i.memory_id, i.confidence) for i in h2.recall("korvex kv301", k=3).items]
     h2.close()
-    assert live == after
+    # float32-математика не обязана быть бит-в-бит одинаковой между сборками
+    # numpy/BLAS: сравниваем с допуском, а не по 6-му знаку
+    assert [m for m, _ in live] == [m for m, _ in after]
+    assert [c for _, c in live] == pytest.approx([c for _, c in after], abs=1e-5)
     assert live[0][0] == 1
 
 
