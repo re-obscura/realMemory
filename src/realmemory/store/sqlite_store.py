@@ -119,14 +119,12 @@ def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
             with lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    for idx in ("CREATE INDEX IF NOT EXISTS "
-                                "idx_memories_scope ON memories(scope)",
-                                "CREATE INDEX IF NOT EXISTS "
-                                "idx_memories_author ON memories(author)",
-                                "CREATE INDEX IF NOT EXISTS "
-                                "idx_publications_trace ON publications(trace_id)",
-                                "CREATE INDEX IF NOT EXISTS "
-                                "idx_publications_synced ON publications(synced_at)"):
+                    for idx in (
+                        "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
+                        "CREATE INDEX IF NOT EXISTS idx_memories_author ON memories(author)",
+                        "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
+                        "CREATE INDEX IF NOT EXISTS idx_publications_synced ON publications(synced_at)",
+                    ):
                         conn.execute(idx)
                     # версия фиксируется той же транзакцией: mark() здесь нельзя —
                     # его внутренний lock нерекурсивен
