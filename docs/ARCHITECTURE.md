@@ -1,8 +1,9 @@
 # realMemory Architecture
 
-Status: v0.4 (single SQLite store shared by all processes, global/project
-scopes, hybrid FTS5 search, thresholds calibrated on real text, 122 tests,
-phase-0 gate PASS).
+Status: v0.8.1 (single SQLite store shared by all processes, global/project
+scopes, hybrid FTS5 search, exact-scan retrieval as default engine with the
+voting index as fallback, GC of forgotten traces, team sharing with
+fail-closed network defaults, 178 tests).
 This document records design decisions and their rationale; changes go through
 an edit of this file in the same commit.
 

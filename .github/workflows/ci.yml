@@ -12,11 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         exclude:
           # сократить матрицу: Windows — только на свежих версиях
-          - os: windows-latest
-            python-version: "3.10"
           - os: windows-latest
             python-version: "3.11"
     steps:
@@ -26,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
-        run: pip install -e ".[dev,mcp]"
+        run: pip install -e ".[dev,mcp,team]"
       - name: Lint
         run: ruff check src tests
       - name: Tests

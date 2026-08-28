@@ -10,7 +10,7 @@ from .types import (
     WriteResult,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.8.1"
 __all__ = [
     "ConsolidationReport",
     "DecisionAction",

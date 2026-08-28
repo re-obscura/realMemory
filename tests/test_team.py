@@ -238,6 +238,7 @@ def test_publish_refuses_foreign_authorship(tmp_path):
 # -- TUI headless smoke ---------------------------------------------------------------
 
 def test_tui_headless_smoke(tmp_path):
+    pytest.importorskip("textual")  # extra [team]; без него TUI-слой не тестируем
     from realmemory.team.tui import TeamApp
 
     env = _Env(tmp_path)

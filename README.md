@@ -1,17 +1,19 @@
 # realMemory
 
 [![ci](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml/badge.svg)](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml)
-[![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/re-obscura/realMemory/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A persistent memory layer for LLM agents with continuous learning: a local
 "hippocampal" memory that writes without re-indexing, forgets via trace
 dynamics, and consolidates episodes into semantics during "sleep".
 
-**Status: v0.5 — retrieval defaults to an exact cosine scan over an in-process
+**Status: v0.8 — retrieval defaults to an exact cosine scan over an in-process
 embedding cache (complete recall, no candidate-generation ceiling), one SQLite
 store shared by all processes, global/project memory scopes, hybrid FTS5
-search, thresholds calibrated on real text.**
+search, thresholds calibrated on real text; explicit team sharing on top
+(local registry with tombstones, passive coordinator, live peer-to-peer,
+fail-closed network defaults).**
 
 ## The idea in a nutshell
 
@@ -162,7 +164,8 @@ python -m realmemory.team policy                     # показать поли
 python -m realmemory.team sync      --path ./rm_data  # доставить решения координатору
 python -m realmemory.team recall-team --path ./rm_data "запрос" [--author X]
 
-# живой peer-endpoint участника (presence + ответы только по публикациям):
+# живой peer-endpoint участника (presence + ответы только по публикациям);
+# привязка вне 127.0.0.1 без REALMEMORY_TEAM_TOKEN отклоняется при старте
 python -m realmemory.team serve --path ./rm_data --host 0.0.0.0 --port 8410
 ```
 
@@ -178,7 +181,8 @@ A close fact recorded under a DIFFERENT author never reinforces that
 trace — it links instead, keeping both viewpoints attributable. Cross-process
 writes propagate through a `memories_rev` revision counter (volatile caches
 resync lazily at the next recall/remember). The MCP-tool `recall_team` exists only when the policy sets a
-coordinator. See [`docs/TEAM.md`](docs/TEAM.md).
+coordinator. See [`docs/TEAM.md`](docs/TEAM.md); full team setup & operations
+guide in [`docs/SETUP.md`](docs/SETUP.md).
 
 ## Observability ("how the memory behaves over time")
 
@@ -236,7 +240,8 @@ default thresholds on real text merged almost everything into blobs — the
 calibration still lives in per-embedder profiles, and the gate-merge share
 is published rather than hidden inside the hit rate.
 
-Tests: **157 passed**.
+Tests: **178 collected — 177 passed**, the headless TUI smoke skips when the
+`[team]` extra (Textual) is not installed.
 
 ## Architecture
 

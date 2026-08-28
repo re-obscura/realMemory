@@ -2,7 +2,9 @@
 Именно эта схема используется при подключении к ZCode."""
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -11,8 +13,13 @@ pytest.importorskip("mcp")
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+_SRC = Path(__file__).resolve().parents[1] / "src"
+
 
 def _server_params(path):
+    # PYTHONPATH со src: подпроцесс работает и без `pip install -e .`
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(_SRC) + os.pathsep + env.get("PYTHONPATH", "")
     return StdioServerParameters(
         command=sys.executable,
         args=[
@@ -20,6 +27,7 @@ def _server_params(path):
             "--path", str(path),
             "--embedder", "hashing",  # без скачивания модели в тесте
         ],
+        env=env,
     )
 
 
