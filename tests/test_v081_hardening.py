@@ -189,7 +189,7 @@ def test_probe_exact_mode_sees_fts_candidates_beyond_budget(tmp_path):
         ids = [h.remember(t, force_new=True).memory_id for t in texts]
         emb, sdr = h._encode(texts[0])
         cosines = {i: h._cosine(emb, h.store.get(i).embedding) for i in ids}
-        assert all(c >= h.config.theta_link for i, c in cosines.items()), cosines
+        assert all(c >= h.config.theta_link for c in cosines.values()), cosines
         lowest = min(ids, key=lambda i: cosines[i])
 
         best_id, _best_cos, near = h._probe(emb, sdr, scope=None, text=texts[0])

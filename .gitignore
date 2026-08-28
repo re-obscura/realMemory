@@ -29,3 +29,7 @@ Thumbs.db
 
 # Agent session artifacts
 .zcode/
+
+# Runtime logs and one-off test dumps
+*.log
+pytest_out.txt
