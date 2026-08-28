@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..team.identity import resolve_identity
 from .policy import TeamPolicy, load_policy
 from .sync import make_client
 from .transport import CoordinatorClient, CoordinatorError, EmbedderMismatch, encode_vector
@@ -97,12 +98,15 @@ def embed_query_text(root_path, text: str) -> tuple[object, str]:
 
 
 def _query_live_peers(presence, qvec, k, local_name, author, project,
-                      token, results: dict, failed: list[str]) -> None:
+                      token, results: dict, failed: list[str],
+                      local_identity: str = "") -> None:
     """Опросить живых коллег (кроме себя) с коротким таймаутом."""
     targets = []
     for p in presence:
         if not p.get("online"):
             continue
+        if p.get("identity") and p.get("identity") == local_identity:
+            continue  # свой же peer: кэш координатора и так покрывает публикации
         address = _safe_peer_address(p.get("address", ""))
         if address is None:
             if p.get("address"):
@@ -161,7 +165,8 @@ def recall_team(root_path, query: str, *, k: int = 5,
     live: dict[tuple[str, str], TeamHit] = {}
     failed: list[str] = []
     _query_live_peers(presence, qvec, k, local_provider_name, author,
-                      project, token, live, failed)
+                      project, token, live, failed,
+                      local_identity=policy.identity or resolve_identity())
 
     cache_hits: list[dict] = []
     try:

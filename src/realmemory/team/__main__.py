@@ -213,6 +213,8 @@ def main(argv=None) -> int:
     sv.add_argument("--host", default="127.0.0.1",
                     help="адрес привязки (для LAN: 0.0.0.0)")
     sv.add_argument("--port", type=int, default=8410)
+    sv.add_argument("--advertise", default=None,
+                    help="адрес для presence вместо автоопределённого LAN IP")
     sv.add_argument("--policy-path", default=None)
     sv.set_defaults(fn=cmd_serve)
 
@@ -225,14 +227,18 @@ def cmd_serve(args) -> int:  # pragma: no cover - долгоживущий де�
     import threading
 
     from .identity import resolve_identity
-    from .peer import make_peer_server, start_heartbeat
+    from .peer import lan_ip, make_peer_server, start_heartbeat
     from .policy import load_policy
 
     policy = load_policy(args.policy_path)
     if not policy.identity:
         policy.identity = resolve_identity()
     token = os.environ.get(policy.token_env or "", "").strip() or None
-    address = f"{args.host}:{args.port}"
+    # binding на 0.0.0.0 слушает все интерфейсы, но в presence рекламировать
+    # его нельзя: коллега уйдёт connect'иться на свой же localhost
+    advertised = getattr(args, "advertise", None) or (
+        lan_ip() if args.host in ("0.0.0.0", "::") else args.host)
+    address = f"{advertised}:{args.port}"
     srv = make_peer_server(args.path, host=args.host, port=args.port,
                            token=token)
     stop = threading.Event()

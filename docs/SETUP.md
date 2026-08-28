@@ -211,7 +211,8 @@ REALMEMORY_TEAM_TOKEN=<секрет> python -m realmemory.team serve \
     --path D:\realmemory\rmd --host 0.0.0.0 --port 8410
 ```
 
-Демон сам шлёт presence-хартбиты с адресом (если настроен координатор).
+Демон сам шлёт presence-хартбиты: при привязке на `0.0.0.0` в presence
+уходит автоматически определённый LAN-адрес (или явный `--advertise IP`).
 Приватность конструктивная: личные следы вне публикаций не попадают в
 кандидаты ни на одном шаге (JOIN memories × publications).
 

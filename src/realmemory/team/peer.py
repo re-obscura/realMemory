@@ -25,6 +25,21 @@ from .policy import require_bind_token
 HEARTBEAT_INTERVAL_S = 30.0
 
 
+def lan_ip() -> str:
+    """Свой адрес в LAN без внешних запросов: UDP-connect только смотрит
+    таблицу маршрутизации, пакет не отправляется. Пусто — не удалось."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.168.255.255", 1))
+        return str(s.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
 class PeerState:
     """Читающий доступ к мозгу владельца: только опубликованное подмножество."""
 
