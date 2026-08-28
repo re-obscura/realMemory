@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -189,9 +190,31 @@ def cmd_sleep(args) -> int:
         report = hippo.consolidate()
         if args.verbose:
             print(json.dumps({**vars(report)}, ensure_ascii=False))
+        _maybe_team_auto_sync(hippo)
     finally:
         hippo.close()
     return 0
+
+
+def _maybe_team_auto_sync(hippo) -> None:
+    """Опциональный авто-sync командного слоя после сна. Никогда не ломает
+    сон: любая ошибка — строка в stderr, статус синхронизации доедет позже."""
+    try:
+        from pathlib import Path as _Path
+
+        from .team.policy import load_policy
+        from .team.sync import push
+
+        env_path = os.environ.get("REALMEMORY_POLICY_PATH")
+        policy = load_policy(_Path(env_path) if env_path else None)
+        if not (policy.coordinator and policy.auto_sync):
+            return
+        summary = push(hippo.store, policy)
+        if summary.published or summary.retracted or summary.auto_retracted:
+            print(f"[realmemory] team auto-sync: +{summary.published} "
+                  f"отзывов {summary.retracted + summary.auto_retracted}")
+    except Exception as exc:  # noqa: BLE001 - сон важнее командного слоя
+        print(f"[realmemory] team auto-sync skipped: {exc}", file=sys.stderr)
 
 
 def _report_hook_error(args, exc: BaseException) -> None:

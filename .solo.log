@@ -1,0 +1,134 @@
+Traceback (most recent call last):
+  File "D:\projs\realMemory\src\realmemory\team\peer.py", line 135, in do_POST
+    hits, _ = self.state.recall_live(
+              ~~~~~~~~~~~~~~~~~~~~~~^
+        qvec, int(payload.get("k") or 5),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        str(payload.get("embedder", "")), payload.get("project"))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\projs\realMemory\src\realmemory\team\peer.py", line 65, in recall_live
+    score = float(np.dot(vec, query_vec) / denom) if denom else 0.0
+                  ~~~~~~^^^^^^^^^^^^^^^^
+ValueError: shapes (256,) and (384,) not aligned: 256 (dim 0) != 384 (dim 0)
+F
+================================== FAILURES ===================================
+_______________________ test_peer_serves_only_published _______________________
+
+self = <realmemory.team.transport.CoordinatorClient object at 0x0000020D72307230>
+method = 'POST', path = '/recall'
+payload = {'query_embedding_b64': '4QOcPjMehb+SHUA/2chwP4W7+b/Rraa/mOgCPo3qob6Voom8FmFavzogYT9fHUc/GjuHPXFJkD9iXe8+l/pbv+fMvD5Ve...xhG6o/2lZbP4WBVz+U2g0/RfgUQOgVUr62OQDANVjNP5RX6r5s8Nw9W5+nP9cWzb/6NaC/', 'k': 5, 'embedder': 'hashing(dim=256,seed=7)'}
+
+    def _call(self, method: str, path: str, payload: dict | None = None) -> dict:
+        url = f"{self.base}{path}"
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+>           with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src\realmemory\team\transport.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Users\m.trunov\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py:187: in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\m.trunov\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py:493: in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+C:\Users\m.trunov\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py:602: in http_response
+    response = self.parent.error(
+C:\Users\m.trunov\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py:531: in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\m.trunov\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py:464: in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <urllib.request.HTTPDefaultErrorHandler object at 0x0000020D723078C0>
+req = <urllib.request.Request object at 0x0000020D72307380>
+fp = <http.client.HTTPResponse object at 0x0000020D7228CAF0>, code = 500
+msg = 'Internal Server Error'
+hdrs = <http.client.HTTPMessage object at 0x0000020D722B3E10>
+
+    def http_error_default(self, req, fp, code, msg, hdrs):
+>       raise HTTPError(req.full_url, code, msg, hdrs, fp)
+E       urllib.error.HTTPError: HTTP Error 500: Internal Server Error
+
+C:\Users\m.trunov\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py:611: HTTPError
+
+The above exception was the direct cause of the following exception:
+
+tmp_path = WindowsPath('C:/Users/m.trunov/AppData/Local/Temp/pytest-of-m.trunov/pytest-167/test_peer_serves_only_publishe0')
+
+    def test_peer_serves_only_published(tmp_path):
+        """Приватность конструктивно: личный след с тем же текстом НЕ виден по сети
+        без публикации; опубликованный — виден с авторством."""
+        from realmemory.team.peer import make_peer_server
+        from realmemory.team.transport import encode_vector
+    
+        h = _brain(tmp_path, "andrey")
+        try:
+            published = h.remember("командный выбор очереди задач: nats",
+                                   scope="proj").memory_id
+            private = h.remember("командный выбор очереди задач: nats",
+                                 scope="proj").memory_id  # личный дубль НЕ публикуем
+            h.feedback([published], 1.0)
+            pol = _policy_file(tmp_path, "http://127.0.0.1:9")
+            pol.identity = "andrey"
+            registry.publish(h.store, [published], policy=pol, now=100.0,
+                             identity="andrey")
+    
+            srv, addr = _peer_server(h.path)
+            try:
+                client = CoordinatorClient(f"http://{addr}", token="sekret",
+                                           timeout_s=2.0)
+                qvec = _vec(42)  # не совпадёт по косинусу, но вернётся как единственный
+>               out = client.raw_post("/recall", {
+                    "query_embedding_b64": encode_vector(qvec), "k": 5,
+                    "embedder": h.store.get_meta("embedder") or "x",
+                })
+
+tests\test_network.py:253: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\realmemory\team\transport.py:115: in raw_post
+    return self._call("POST", path, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <realmemory.team.transport.CoordinatorClient object at 0x0000020D72307230>
+method = 'POST', path = '/recall'
+payload = {'query_embedding_b64': '4QOcPjMehb+SHUA/2chwP4W7+b/Rraa/mOgCPo3qob6Voom8FmFavzogYT9fHUc/GjuHPXFJkD9iXe8+l/pbv+fMvD5Ve...xhG6o/2lZbP4WBVz+U2g0/RfgUQOgVUr62OQDANVjNP5RX6r5s8Nw9W5+nP9cWzb/6NaC/', 'k': 5, 'embedder': 'hashing(dim=256,seed=7)'}
+
+    def _call(self, method: str, path: str, payload: dict | None = None) -> dict:
+        url = f"{self.base}{path}"
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8")[:300]
+                parsed = json.loads(detail)
+            except (ValueError, UnicodeDecodeError):
+                parsed = {}
+            if exc.code == 401:
+                raise AuthError("координатор отклонил токен (401)") from exc
+            if exc.code == 409 and parsed.get("error") == "embedder_mismatch":
+                raise EmbedderMismatch(parsed.get("known_embedders", []),
+                                       parsed.get("requested", "")) from exc
+>           raise CoordinatorError(
+                f"координатор ответил {exc.code}: {detail or exc.reason}") from exc
+E           realmemory.team.transport.CoordinatorError: координатор ответил 500: {"error": "internal: ValueError('shapes (256,) and (384,) not aligned: 256 (dim 0) != 384 (dim 0)')"}
+
+src\realmemory\team\transport.py:75: CoordinatorError
+=========================== short test summary info ===========================
+FAILED tests/test_network.py::test_peer_serves_only_published - realmemory.te...

@@ -685,6 +685,32 @@ class MemoryStore:
             ).fetchall()
         return [tuple(r) for r in rows]
 
+    def publications_synced_active(self) -> list[tuple]:
+        """Доставленные и всё ещё активные публикации (для детекции
+        «след локально забыт после доставки» — GC-автоотзыва)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, trace_id, project, author, published_at,"
+                " revoked_at, content_hash FROM publications"
+                " WHERE synced_at IS NOT NULL AND revoked_at IS NULL"
+                " ORDER BY published_at"
+            ).fetchall()
+        return [tuple(r) for r in rows]
+
+    def publication_mark_synced_force(self, publication_ids, when: float) -> int:
+        """Проставить synced_at БЕЗ условия «был NULL» (повторная отметка
+        после форс-отзыва)."""
+        ids = [str(i) for i in publication_ids]
+        if not ids:
+            return 0
+        ph = ",".join("?" * len(ids))
+        with self._txn() as con:
+            cur = con.execute(
+                f"UPDATE publications SET synced_at=? WHERE id IN ({ph})",
+                (float(when), *ids),
+            )
+            return int(cur.rowcount)
+
     def publication_mark_synced(self, publication_ids, when: float) -> int:
         ids = [str(i) for i in publication_ids]
         if not ids:

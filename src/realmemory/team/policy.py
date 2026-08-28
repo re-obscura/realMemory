@@ -40,6 +40,9 @@ class TeamPolicy:
     identity: str = ""
     coordinator: str | None = None            # этап сети; сейчас только бейдж
     token_env: str = "REALMEMORY_TEAM_TOKEN"
+    # опциональный авто-sync после каждого «сна» (хук Stop); сеть всё равно
+    # активна только при непустом coordinator
+    auto_sync: bool = False
     default_kinds: list[str] = field(default_factory=lambda: ["semantic"])
     default_min_reinforcements: int = 2
     projects: list[ProjectRule] = field(default_factory=list)
@@ -91,6 +94,7 @@ def load_policy(path: Path | None = None) -> TeamPolicy:
     policy.identity = str(raw.get("identity", "") or "")
     policy.coordinator = raw.get("coordinator") or None
     policy.token_env = str(raw.get("token_env") or policy.token_env)
+    policy.auto_sync = bool(raw.get("auto_sync", False))
     policy.default_kinds = list(raw.get("default_kinds") or ["semantic"])
     policy.default_min_reinforcements = int(raw.get("min_reinforcements", 2))
     for item in raw.get("projects") or []:
@@ -125,6 +129,10 @@ def save_policy(policy: TeamPolicy, path: Path | None = None) -> Path:
     else:
         raw.pop("coordinator", None)
     raw["token_env"] = policy.token_env
+    if policy.auto_sync:
+        raw["auto_sync"] = True
+    else:
+        raw.pop("auto_sync", None)
     raw.setdefault("default_kinds", policy.default_kinds)
     raw["default_kinds"] = policy.default_kinds
     raw["min_reinforcements"] = policy.default_min_reinforcements

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -119,10 +120,10 @@ def cmd_sync(args) -> int:
             f"отзывов доставлено {summary.retracted}")
     if summary.marked != summary.published + summary.retracted:
         line += f" (помечено {summary.marked})"
-    if summary.content_lost:
-        line += f"; БЕЗ контента (след удалён локально): {summary.content_lost}"
+    if summary.auto_retracted:
+        line += f"; авто-отзыв забытых локально: {summary.auto_retracted}"
     print(line)
-    return 0 if not summary.content_lost else 2
+    return 0
 
 
 def cmd_recall_team(args) -> int:
@@ -146,14 +147,20 @@ def cmd_recall_team(args) -> int:
         }, ensure_ascii=False, indent=2))
         return 0
     who = ", ".join(answer.presence_online) or "(никого online)"
-    age = (f"самое свежее: {answer.max_age_s / 3600:.1f} ч назад"
-           if answer.max_age_s is not None else "")
-    print(f"coordinator {answer.coordinator} · online: {who} · {age}")
+    age = (f"возраст выдачи до {answer.max_age_s / 3600:.1f} ч"
+           if answer.max_age_s is not None else "живые данные")
+    live = ", ".join(answer.peers_live) or "нет"
+    failed = "; ".join(answer.peers_failed)
+    print(f"coordinator {answer.coordinator} · online: {who} · "
+          f"live: {live} · {age}")
+    if failed:
+        print(f"peer недоступен: {failed}")
     if answer.abstained:
-        print("в командном кэше по теме ничего нет")
+        print("в командной памяти по теме ничего нет")
         return 0
     for h in answer.hits:
-        print(f"[{h.score:.3f}] ({h.author}/{h.project}) {h.text}")
+        mark = "LIVE" if h.source == "live" else "кэш"
+        print(f"[{h.score:.3f}] ({h.author}/{h.project}, {mark}) {h.text}")
     return 0
 
 
@@ -197,8 +204,50 @@ def main(argv=None) -> int:
     rt.add_argument("--json", action="store_true")
     rt.set_defaults(fn=cmd_recall_team)
 
+    sv = sub.add_parser("serve",
+                        help="живой peer-endpoint + presence-хартбиты")
+    sv.add_argument("--path", required=True)
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="адрес привязки (для LAN: 0.0.0.0)")
+    sv.add_argument("--port", type=int, default=8410)
+    sv.add_argument("--policy-path", default=None)
+    sv.set_defaults(fn=cmd_serve)
+
     args = parser.parse_args(argv)
     return args.fn(args)
+
+
+def cmd_serve(args) -> int:  # pragma: no cover - долгоживущий демон
+    """Живой peer-endpoint + периодический presence-хартбит."""
+    import threading
+
+    from .identity import resolve_identity
+    from .peer import make_peer_server, start_heartbeat
+    from .policy import load_policy
+
+    policy = load_policy(args.policy_path)
+    if not policy.identity:
+        policy.identity = resolve_identity()
+    token = os.environ.get(policy.token_env or "", "").strip() or None
+    address = f"{args.host}:{args.port}"
+    srv = make_peer_server(args.path, host=args.host, port=args.port,
+                           token=token)
+    stop = threading.Event()
+    if policy.coordinator:
+        start_heartbeat(policy, address, stop)
+        print(f"[realmemory] peer {address} · presence → {policy.coordinator}"
+              f" (identity: {policy.identity})", flush=True)
+    else:
+        print("[realmemory] peer без координатора: presence отключена",
+              flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        srv.server_close()
+    return 0
 
 
 if __name__ == "__main__":

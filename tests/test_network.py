@@ -10,7 +10,7 @@ import pytest
 from realmemory import Hippocampus
 from realmemory.team import registry
 from realmemory.team.coordinator import make_server
-from realmemory.team.policy import TeamPolicy, save_policy
+from realmemory.team.policy import TeamPolicy, load_policy, save_policy
 from realmemory.team.transport import (
     AuthError,
     CoordinatorClient,
@@ -18,6 +18,7 @@ from realmemory.team.transport import (
     TransportError,
 )
 from realmemory.timeprov import FakeClock
+from tests.test_team import _cfg
 
 
 def _vec(seed: int) -> np.ndarray:
@@ -212,3 +213,210 @@ def test_mcp_tool_hidden_without_coordinator(tmp_path):
 
 
 import asyncio
+
+# -- v0.8: live peer-to-peer ---------------------------------------------------------
+
+def _peer_server(root, token="sekret", port=0):
+    from realmemory.team.peer import make_peer_server
+
+    srv = make_peer_server(root, host="127.0.0.1", port=port, token=token)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    return srv, f"127.0.0.1:{srv.server_address[1]}"
+
+
+def test_peer_serves_only_published(tmp_path):
+    """Приватность конструктивно: личный след с тем же текстом НЕ виден по сети
+    без публикации; опубликованный — виден с авторством."""
+    from realmemory.team.transport import encode_vector
+
+    h = _brain(tmp_path, "andrey")
+    try:
+        published = h.remember("командный выбор очереди задач: nats",
+                               scope="proj").memory_id
+        private = h.remember("командный выбор очереди задач: nats",
+                             scope="proj").memory_id  # личный дубль НЕ публикуем
+        h.feedback([published], 1.0)
+        pol = _policy_file(tmp_path, "http://127.0.0.1:9")
+        pol.identity = "andrey"
+        registry.publish(h.store, [published], policy=pol, now=100.0,
+                         identity="andrey")
+
+        srv, addr = _peer_server(h.path)
+        try:
+            client = CoordinatorClient(f"http://{addr}", token="sekret",
+                                       timeout_s=2.0)
+            qvec = np.random.default_rng(42).standard_normal(256).astype(np.float32)
+            out = client.raw_post("/recall", {
+                "query_embedding_b64": encode_vector(qvec), "k": 5,
+                "embedder": h.store.get_meta("embedder") or "x",
+            })
+            authors = {hit["author"] for hit in out["hits"]}
+            texts = {hit["text"] for hit in out["hits"]}
+            assert authors == {"andrey"}
+            assert len(out["hits"]) == 1
+            assert all("nats" in t for t in texts)
+            del private
+        finally:
+            srv.shutdown(); srv.server_close()
+    finally:
+        h.close()
+
+
+def test_peer_embedder_mismatch_rejected(tmp_path):
+    from realmemory.team.transport import EmbedderMismatch, encode_vector
+
+    h = _brain(tmp_path, "andrey")
+    try:
+        srv, addr = _peer_server(h.path)
+        try:
+            client = CoordinatorClient(f"http://{addr}", token="sekret",
+                                       timeout_s=2.0)
+            with pytest.raises(EmbedderMismatch):
+                client.raw_post("/recall", {
+                    "query_embedding_b64": encode_vector(_vec(5)), "k": 3,
+                    "embedder": "совсем другой эмбеддер",
+                })
+        finally:
+            srv.shutdown(); srv.server_close()
+    finally:
+        h.close()
+
+
+def test_recall_team_live_then_cache_fallback(tmp_path, coord, monkeypatch):
+    """Живой коллега отвечает LIVE; офлайн-коллега падает в кэш-фоллбэк,
+    недоступность peer не ломает ответ."""
+    monkeypatch.setenv("REALMEMORY_TEAM_TOKEN", "sekret")
+
+    # машина Андрея: живой peer с публикацией
+    h1 = _brain(tmp_path / "andrey", "andrey")
+    try:
+        mid_a = h1.remember("инфраструктура тестов крутится в github actions",
+                            scope="proj").memory_id
+        pol_a = TeamPolicy(identity="andrey", coordinator=coord)
+        save_policy(pol_a, tmp_path / "andrey" / "team.yaml")
+        registry.publish(h1.store, [mid_a], policy=pol_a, now=100.0,
+                         identity="andrey")
+        from realmemory.team.sync import push
+        push(h1.store, pol_a)
+
+        srv, addr = _peer_server(h1.path)
+
+        # машина Максима: своя публикация, peer не поднят
+        h2 = _brain(tmp_path / "maxim", "maxim")
+        try:
+            mid_m = h2.remember("деплой идёт через systemd unit unitname",
+                                scope="proj").memory_id
+            pol_m = TeamPolicy(identity="maxim", coordinator=coord)
+            save_policy(pol_m, tmp_path / "maxim" / "team.yaml")
+            registry.publish(h2.store, [mid_m], policy=pol_m, now=100.0,
+                             identity="maxim")
+            push(h2.store, pol_m)
+
+            # presence: Андрей online с адресом; Максим online без адреса
+            c = _client(coord)
+            c.heartbeat("andrey", address=addr, projects=["proj"])
+            c.heartbeat("maxim")
+
+            from realmemory.team.recall_team import recall_team
+
+            answer = recall_team(
+                h2.path,
+                "инфраструктура тестов github actions", k=5,
+                policy=pol_m)
+            assert not answer.abstained
+            assert "andrey" in answer.peers_live
+            sources = {h.author: h.source for h in answer.hits}
+            assert sources.get("andrey") == "live"
+            assert sources.get("maxim") == "cache"
+            # публикация Максима должна уехать в координатор
+            assert any(h.author == "maxim" for h in answer.hits)
+
+            # peer Андрея «падает»: фоллбэк на кэш, ответ не пустой
+            srv.shutdown(); srv.server_close()
+            answer2 = recall_team(
+                h2.path,
+                "инфраструктура тестов github actions", k=5,
+                policy=pol_m)
+            assert not answer2.abstained
+            assert "andrey" in "".join(answer2.peers_failed) or \
+                   answer2.peers_live == []
+            assert any(h.author == "andrey" and h.source == "cache"
+                       for h in answer2.hits)
+        finally:
+            h2.close()
+    finally:
+        h1.close()
+
+
+def test_gc_before_sync_auto_retracts(tmp_path, coord, monkeypatch):
+    """content-lost закрыт: доставленная публикация, чей след затем забылся
+    локально (GC), отзывается на координаторе следующим sync — без контента,
+    tombstone не требует данных."""
+    monkeypatch.setenv("REALMEMORY_TEAM_TOKEN", "sekret")
+    from realmemory.team.sync import push
+
+    cfg = _cfg(tau_episodic=10 * 86400.0, gc_grace_below_floor_s=1.0)
+    h = Hippocampus.open(tmp_path / "rm", config=cfg, clock=FakeClock(),
+                         author="maxim")
+    try:
+        mid = h.remember("забудем это решение после публикации p501",
+                         scope="proj").memory_id
+        for _ in range(2):
+            h.feedback([mid], 1.0)
+        pol = _policy_file(tmp_path, coord)
+        registry.publish(h.store, [mid], policy=pol, now=10.0, identity="maxim")
+
+        first = push(h.store, pol)             # доставка активной публикации
+        assert first.published == 1
+
+        h.clock.advance(60 * 86400.0)          # локальное забывание (GC)
+        assert h.consolidate().forgotten_traces == 1
+        assert h.store.get(mid) is None
+
+        second = push(h.store, pol)            # tombstone без контента
+        assert second.auto_retracted == 1 and second.retracted == 1
+        c = _client(coord)
+        dump = c.cache_dump()
+        assert dump["active"] == [] and len(dump["tombstones"]) == 1
+        assert registry.sync_status(h.store)["awaiting_sync"] == 0
+    finally:
+        h.close()
+
+
+def test_auto_sync_hook_after_sleep(tmp_path, coord, monkeypatch):
+    """auto_sync=true: Stop-хук после сна сам доставляет публикации."""
+    monkeypatch.setenv("REALMEMORY_TEAM_TOKEN", "sekret")
+    monkeypatch.setenv("REALMEMORY_POLICY_PATH", str(tmp_path / "team.yaml"))
+    from realmemory.hook_cli import main as hook_main
+
+    h = _brain(tmp_path, "maxim")
+    try:
+        # выравниваем FakeClock с реальным временем: хук спит с SystemClock,
+        # и консолидация не должна «состарить» след на три года
+        import time as _time
+        h.clock.advance(_time.time() - h.clock.now())
+        mid = h.remember("решение для авто-sync проверки p502",
+                         scope="proj").memory_id
+        h.feedback([mid], 1.0)
+        registry.publish(h.store, [mid],
+                         policy=_policy_file(tmp_path, coord), now=1.0,
+                         identity="maxim")
+        pol = load_policy(tmp_path / "team.yaml")
+        pol.auto_sync = True
+        save_policy(pol, tmp_path / "team.yaml")
+        path = str(h.path)
+        h.close()
+
+        with pytest.raises(SystemExit) as e:
+            hook_main(["sleep", "--path", path])
+        assert e.value.code == 0
+
+        c = _client(coord)
+        dump = c.cache_dump()
+        assert len(dump["active"]) == 1
+    finally:
+        try:
+            h.close()
+        except Exception as exc:  # noqa: BLE001 - уже закрыт — не важно
+            print(f"close note: {exc}")

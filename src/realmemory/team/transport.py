@@ -109,3 +109,7 @@ class CoordinatorClient:
 
     def cache_dump(self) -> dict:
         return self._call("GET", "/cache/dump")
+
+    def raw_post(self, path: str, payload: dict) -> dict:
+        """Прямой вызов произвольного маршрута (peer-endpoint /recall)."""
+        return self._call("POST", path, payload)
