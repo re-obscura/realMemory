@@ -107,11 +107,38 @@ def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
         with lock:
             cols = {r[1] for r in conn.execute(
                 "PRAGMA table_info(memories)").fetchall()}
-            complete = "author" in cols and bool(conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='publications'").fetchone())
+            pubs_cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(publications)").fetchall()}
+            complete = ("author" in cols and "synced_at" in pubs_cols
+                        and bool(conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' "
+                            "AND name='publications'").fetchone()))
         if complete:
-            mark(SCHEMA_VERSION)
+            # свежая база: достроить идемпотентные индексы «мигрирующих»
+            # колонок (их нет в базовом скрипте) и зафиксировать версию
+            with lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for idx in ("CREATE INDEX IF NOT EXISTS "
+                                "idx_memories_scope ON memories(scope)",
+                                "CREATE INDEX IF NOT EXISTS "
+                                "idx_memories_author ON memories(author)",
+                                "CREATE INDEX IF NOT EXISTS "
+                                "idx_publications_trace ON publications(trace_id)",
+                                "CREATE INDEX IF NOT EXISTS "
+                                "idx_publications_synced ON publications(synced_at)"):
+                        conn.execute(idx)
+                    # версия фиксируется той же транзакцией: mark() здесь нельзя —
+                    # его внутренний lock нерекурсивен
+                    conn.execute(
+                        "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(SCHEMA_VERSION),),
+                    )
+                    conn.execute("COMMIT")
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
             return str(SCHEMA_VERSION)
         # базы до появления нумерации: наличие scope отличает v0.3+ от v0.2-
         stored = 1 if "scope" in cols else 0
@@ -181,7 +208,6 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
-    "CREATE INDEX IF NOT EXISTS idx_publications_synced ON publications(synced_at)",
     "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
     """
     CREATE TABLE IF NOT EXISTS edges (

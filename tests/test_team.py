@@ -356,3 +356,41 @@ def test_foreign_below_link_threshold_creates(tmp_path):
         del r1
     finally:
         h1.close(); h2.close()
+
+
+def test_upgrade_from_broken_intermediate_v2(tmp_path):
+    """Регресс инцидента запуска: база после прерванного апгрейда — версия '2',
+    publications БЕЗ synced_at (создана bootstrap'ом промежуточной версии).
+    Bootstrap не должен падать на индексе мигрирующей колонки; цепочка
+    обязана довести базу до v3."""
+    db = tmp_path / "legacy.db"
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " text TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,"
+        " meta TEXT NOT NULL, embedding BLOB NOT NULL, sdr BLOB NOT NULL,"
+        " created_at REAL NOT NULL, updated_at REAL NOT NULL,"
+        " reinforced_count INTEGER NOT NULL DEFAULT 0,"
+        " last_reinforced_at REAL NOT NULL, base_strength REAL NOT NULL DEFAULT 1.0,"
+        " valid_from REAL NOT NULL, valid_to REAL, superseded_by INTEGER,"
+        " scope TEXT NOT NULL DEFAULT 'global', author TEXT NOT NULL DEFAULT '')")
+    con.execute(
+        "CREATE TABLE publications (id TEXT PRIMARY KEY, trace_id INTEGER NOT NULL,"
+        " project TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',"
+        " published_at REAL NOT NULL, revoked_at REAL,"
+        " content_hash TEXT NOT NULL DEFAULT '')")
+    con.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    con.execute("INSERT INTO db_meta VALUES('schema_version','2')")
+    con.commit(); con.close()
+
+    from realmemory.store.sqlite_store import MemoryStore
+
+    store = MemoryStore(db, dim=8)
+    try:
+        assert store.schema_version == "3"
+        con = sqlite3.connect(str(db))
+        cols = {r[1] for r in con.execute("PRAGMA table_info(publications)")}
+        assert "synced_at" in cols
+        con.close()
+    finally:
+        store.close()
