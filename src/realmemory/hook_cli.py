@@ -211,8 +211,10 @@ def _maybe_team_auto_sync(hippo) -> None:
             return
         summary = push(hippo.store, policy)
         if summary.published or summary.retracted or summary.auto_retracted:
+            # Stop-хук: stdout может попадать в контекст сессии — только stderr
             print(f"[realmemory] team auto-sync: +{summary.published} "
-                  f"отзывов {summary.retracted + summary.auto_retracted}")
+                  f"отзывов {summary.retracted + summary.auto_retracted}",
+                  file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - сон важнее командного слоя
         print(f"[realmemory] team auto-sync skipped: {exc}", file=sys.stderr)
 

@@ -351,7 +351,8 @@ def test_recall_team_live_then_cache_fallback(tmp_path, coord, monkeypatch):
 
 def test_gc_before_sync_auto_retracts(tmp_path, coord, monkeypatch):
     """content-lost закрыт: доставленная публикация, чей след затем забылся
-    локально (GC), отзывается на координаторе следующим sync — без контента,
+    локально (GC), получает tombstone УЖЕ в момент забывания (registry виден
+    без сети), а следующий sync доставляет его на координатор — без контента,
     tombstone не требует данных."""
     monkeypatch.setenv("REALMEMORY_TEAM_TOKEN", "sekret")
     from realmemory.team.sync import push
@@ -371,11 +372,16 @@ def test_gc_before_sync_auto_retracts(tmp_path, coord, monkeypatch):
         assert first.published == 1
 
         h.clock.advance(60 * 86400.0)          # локальное забывание (GC)
-        assert h.consolidate().forgotten_traces == 1
+        report = h.consolidate()
+        assert report.forgotten_traces == 1
+        assert report.publications_retracted == 1
         assert h.store.get(mid) is None
+        # tombstone стоит локально сразу, до всякой сети
+        assert registry.active_publications(h.store) == []
+        assert registry.sync_status(h.store)["awaiting_sync"] == 1
 
-        second = push(h.store, pol)            # tombstone без контента
-        assert second.auto_retracted == 1 and second.retracted == 1
+        second = push(h.store, pol)            # доставка готового tombstone
+        assert second.retracted == 1 and second.auto_retracted == 0
         c = _client(coord)
         dump = c.cache_dump()
         assert dump["active"] == [] and len(dump["tombstones"]) == 1

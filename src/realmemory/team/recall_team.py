@@ -11,6 +11,7 @@ max_age_s — верхняя граница устаревания ХУДШЕГ�
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -22,6 +23,10 @@ from .transport import CoordinatorClient, CoordinatorError, EmbedderMismatch, en
 
 LIVE_TIMEOUT_S = 1.5
 MAX_LIVE_PEERS = 6
+
+# адрес приходит из ЧУЖИХ heartbeat'ов: строгий host:port не даёт завернутому
+# в http://{address} запросу (вместе с Bearer-токеном) уехать на произвольный URL
+_ADDRESS_RE = re.compile(r"[A-Za-z0-9._-]{1,253}:(\d{1,5})")
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,16 @@ class TeamAnswer:
     presence_online: list[str] = field(default_factory=list)
     peers_live: list[str] = field(default_factory=list)
     peers_failed: list[str] = field(default_factory=list)
+    coordinator_error: str = ""         # кэш недоступен (не путать с «пусто»)
+
+
+def _safe_peer_address(address: str) -> str | None:
+    """host:port или None; некорректные адреса пропускаются, не роняют опрос."""
+    address = (address or "").strip()
+    m = _ADDRESS_RE.fullmatch(address)
+    if not m or not 0 < int(m.group(1)) < 65536:
+        return None
+    return address
 
 
 def _brain_meta(root_path) -> tuple[str, int]:
@@ -86,12 +101,18 @@ def _query_live_peers(presence, qvec, k, local_name, author, project,
     """Опросить живых коллег (кроме себя) с коротким таймаутом."""
     targets = []
     for p in presence:
-        if not p.get("online") or not p.get("address"):
+        if not p.get("online"):
+            continue
+        address = _safe_peer_address(p.get("address", ""))
+        if address is None:
+            if p.get("address"):
+                failed.append(f"{p.get('identity', '?')}: "
+                              f"некорректный адрес {p.get('address')!r}")
             continue
         ident = p["identity"]
         if author is not None and ident != author:
             continue
-        targets.append((ident, p["address"]))
+        targets.append((ident, address))
     for ident, address in targets[:MAX_LIVE_PEERS]:
         peer_client = CoordinatorClient(f"http://{address}", token=token,
                                         timeout_s=LIVE_TIMEOUT_S)
@@ -130,6 +151,7 @@ def recall_team(root_path, query: str, *, k: int = 5,
 
     presence: list[dict] = []
     online: list[str] = []
+    coordinator_error = ""
     try:
         presence = client.presence()
         online = [p["identity"] for p in presence if p.get("online")]
@@ -141,8 +163,14 @@ def recall_team(root_path, query: str, *, k: int = 5,
     _query_live_peers(presence, qvec, k, local_provider_name, author,
                       project, token, live, failed)
 
-    cache_hits = client.search(qvec, k=k, embedder=local_provider_name,
-                               author=author, project=project)
+    cache_hits: list[dict] = []
+    try:
+        cache_hits = client.search(qvec, k=k, embedder=local_provider_name,
+                                   author=author, project=project)
+    except CoordinatorError as exc:
+        # кэш недоступен — отдаём живые хиты и честную причину вместо падения
+        coordinator_error = str(exc)
+
     merged: dict[tuple[str, str], TeamHit] = dict(live)
     for h in cache_hits:
         key = (h.get("author", ""), h.get("text", ""))
@@ -166,4 +194,5 @@ def recall_team(root_path, query: str, *, k: int = 5,
         coordinator=policy.coordinator or "",
         presence_online=online,
         peers_live=sorted({h.peer for h in ordered if h.source == "live"}),
-        peers_failed=failed)
+        peers_failed=failed,
+        coordinator_error=coordinator_error)

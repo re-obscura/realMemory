@@ -13,11 +13,14 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from .policy import require_bind_token
 
 HEARTBEAT_INTERVAL_S = 30.0
 
@@ -107,7 +110,11 @@ class PeerHandler(BaseHTTPRequestHandler):
 
     def _authorized(self) -> bool:
         want = self.expected_token
-        return not want or self.headers.get("Authorization", "") == f"Bearer {want}"
+        if not want:
+            return True
+        # сравнение с постоянным временем: токен — общий секрет команды
+        return hmac.compare_digest(self.headers.get("Authorization", ""),
+                                   f"Bearer {want}")
 
     def do_GET(self):
         if self.path.split("?")[0] == "/health":
@@ -132,10 +139,14 @@ class PeerHandler(BaseHTTPRequestHandler):
         try:
             import numpy as np
 
+            embedder = str(payload.get("embedder", ""))
+            if not embedder:
+                # без имени эмбеддера сравнение бессмысленно: честный отказ
+                return self._send(400, {"error": "embedder required"})
             qvec = np.frombuffer(raw, dtype=np.float32)
             hits, _ = self.state.recall_live(
                 qvec, int(payload.get("k") or 5),
-                str(payload.get("embedder", "")), payload.get("project"))
+                embedder, payload.get("project"))
             return self._send(200, {"hits": hits, "live": True})
         except EmbedderMismatchPeer as exc:
             return self._send(409, {"error": "embedder_mismatch",
@@ -150,6 +161,7 @@ class PeerHandler(BaseHTTPRequestHandler):
 
 
 def make_peer_server(root, host="127.0.0.1", port=8410, token=None):
+    require_bind_token(host, token, what="peer-endpoint")
     srv = ThreadingHTTPServer((host, int(port)), PeerHandler)
     srv.state = PeerState(Path(root))  # type: ignore[attr-defined]
     srv.token = token  # type: ignore[attr-defined]

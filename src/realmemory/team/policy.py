@@ -20,6 +20,23 @@ from typing import Any
 
 DEFAULT_POLICY_PATH = Path.home() / ".realmemory" / "team.yaml"
 
+_LOOPBACK_HOSTS = frozenset({"", "127.0.0.1", "::1", "localhost"})
+
+
+def require_bind_token(host: str, token: str | None, *, what: str) -> None:
+    """Fail-closed: сетевой демон вне loopback обязан иметь общий токен.
+
+    Без токена контент памяти и presence уходят по открытому HTTP любому
+    в локальной сети; отказ со внятной причиной лучше молчаливого демона.
+    """
+    if token or host.strip() in _LOOPBACK_HOSTS:
+        return
+    raise SystemExit(
+        f"[realmemory] {what}: привязка к {host!r} без общего токена отклонена. "
+        "Задайте общий секрет команды (см. --token-env / REALMEMORY_TEAM_TOKEN) "
+        "или слушайте 127.0.0.1."
+    )
+
 # статусы решения classify(); наружу отдаём как есть (стабильный контракт)
 ELIGIBLE = "eligible"
 BLOCKED_NEVER = "blocked-never"

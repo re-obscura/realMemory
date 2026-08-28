@@ -142,6 +142,7 @@ def cmd_recall_team(args) -> int:
             "abstained": answer.abstained,
             "max_age_s": answer.max_age_s,
             "coordinator": answer.coordinator,
+            "coordinator_error": answer.coordinator_error,
             "online": answer.presence_online,
             "hits": [vars(h) for h in answer.hits],
         }, ensure_ascii=False, indent=2))
@@ -153,6 +154,8 @@ def cmd_recall_team(args) -> int:
     failed = "; ".join(answer.peers_failed)
     print(f"coordinator {answer.coordinator} · online: {who} · "
           f"live: {live} · {age}")
+    if answer.coordinator_error:
+        print(f"координатор недоступен: {answer.coordinator_error}")
     if failed:
         print(f"peer недоступен: {failed}")
     if answer.abstained:

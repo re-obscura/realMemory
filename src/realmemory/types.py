@@ -74,6 +74,7 @@ class ConsolidationReport:
     rewards_applied: int = 0
     journal_pruned: int = 0
     forgotten_traces: int = 0
+    publications_retracted: int = 0  # tombstones публикаций забытых следов
     elapsed_ms: float = 0.0
 
 

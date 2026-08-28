@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 
@@ -166,6 +167,7 @@ def build_server(hippo, default_project: str | None = None,
                 "abstained": answer.abstained,
                 "max_age_s": answer.max_age_s,
                 "online": answer.presence_online,
+                "coordinator_error": answer.coordinator_error,
                 "hits": [vars(h) for h in answer.hits],
             }, ensure_ascii=False)
 
@@ -204,9 +206,11 @@ def make_embedder(choice: str = "auto"):
 
             return FastEmbedProvider()
         except ImportError:
+            # stdout у stdio-сервера — канал JSON-RPC, диагностика только в stderr
             print(
                 "[realmemory] fastembed не установлен — используется HashingEmbedder. "
-                "Установите: pip install 'realmemory[local]'"
+                "Установите: pip install 'realmemory[local]'",
+                file=sys.stderr,
             )
             from ..encoding.embedder import HashingEmbedder
 
@@ -271,7 +275,9 @@ def main(argv=None) -> None:
                              namespace=args.namespace, author=identity)
     default_project = resolve_project(args.project)
     if default_project:
-        print(f"[realmemory] project scope: {default_project}", flush=True)
+        # stdout занят JSON-RPC-транспортом — служебные строки только в stderr
+        print(f"[realmemory] project scope: {default_project}", file=sys.stderr,
+              flush=True)
     build_server(hippo, default_project=default_project,
                  team_root=args.path,
                  team_policy_path=_team_policy_path()).run()

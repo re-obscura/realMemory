@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hmac
 import json
 import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from .policy import require_bind_token
 
 PRESENCE_TTL_S = 90.0
 
@@ -218,7 +221,8 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
         if not want:
             return True
         got = self.headers.get("Authorization", "")
-        return got == f"Bearer {want}"
+        # сравнение с постоянным временем: токен — общий секрет команды
+        return hmac.compare_digest(got, f"Bearer {want}")
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -266,10 +270,14 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                 n = self.state.retract(payload.get("tombstones") or [])
                 return self._send(200, {"retracted": n})
             if path == "/search":
+                embedder = str(payload.get("embedder", ""))
+                if not embedder:
+                    # без имени эмбеддера косинус несравним ни с чем: честный отказ
+                    return self._send(400, {"error": "embedder required"})
                 hits, meta = self.state.search(
                     str(payload.get("query_embedding_b64", "")),
                     int(payload.get("k") or 5),
-                    str(payload.get("embedder", "")),
+                    embedder,
                     payload.get("author"), payload.get("project"))
                 code = 409 if meta.get("error") == "embedder_mismatch" else 200
                 return self._send(code, {"hits": hits, **meta})
@@ -297,6 +305,8 @@ def main(argv=None) -> None:  # pragma: no cover - долгоживущий пр
                         help="имя переменной окружения с общим токеном команды")
     args = parser.parse_args(argv)
     token = __import__("os").environ.get(args.token_env, "").strip() or None
+    # fail-closed: наружу (0.0.0.0 и т.п.) — только с общим токеном команды
+    require_bind_token(args.host, token, what="coordinator")
     srv = make_server(args.data, args.host, args.port, token)
     actual = srv.server_address[1]
     print(f"[realmemory-coordinator] listening on {args.host}:{actual}"

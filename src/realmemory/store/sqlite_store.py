@@ -259,6 +259,12 @@ _COLS = (
     "reinforced_count,last_reinforced_at,base_strength,valid_from,valid_to,superseded_by,scope,author"
 )
 
+# колоночный «лёгкий» срез для проходов «сна»: динамика следа без блобов
+_COLS_LIGHT = "id,kind,created_at,last_reinforced_at,base_strength,reinforced_count"
+
+# SQLite ограничивает число параметров запроса: длинные IN-списки режем
+_SQL_CHUNK = 500
+
 
 class StorageError(Exception):
     """Повреждение или недоступность хранилища."""
@@ -478,19 +484,26 @@ class MemoryStore:
         ids = sorted({int(i) for i in memory_ids})
         if not ids:
             return 0
-        placeholders = ",".join("?" * len(ids))
         with self._txn() as con:
-            con.execute(
-                f"DELETE FROM elig_sources WHERE mem_id IN ({placeholders})", ids
-            )
+            for start in range(0, len(ids), _SQL_CHUNK):
+                part = ids[start:start + _SQL_CHUNK]
+                placeholders = ",".join("?" * len(part))
+                con.execute(
+                    f"DELETE FROM elig_sources WHERE mem_id IN ({placeholders})", part
+                )
             self.bump_memories_rev(con)
-            con.executemany(
-                "DELETE FROM memories WHERE id=?", ((i,) for i in ids)
-            )
-            deleted = int(con.execute(
-                f"SELECT COUNT(*) FROM memories WHERE id IN ({placeholders})", ids
-            ).fetchone()[0])
-        return len(ids) - deleted
+            remaining = 0
+            for start in range(0, len(ids), _SQL_CHUNK):
+                part = ids[start:start + _SQL_CHUNK]
+                con.executemany(
+                    "DELETE FROM memories WHERE id=?", ((i,) for i in part)
+                )
+                placeholders = ",".join("?" * len(part))
+                remaining += int(con.execute(
+                    f"SELECT COUNT(*) FROM memories WHERE id IN ({placeholders})",
+                    part,
+                ).fetchone()[0])
+        return len(ids) - remaining
 
     def adjust_base(self, memory_id: int, base_strength: float, updated_at: float) -> None:
         """Ослабление следа без сброса таймера подкрепления (негативный feedback)."""
@@ -591,12 +604,16 @@ class MemoryStore:
         ids = [int(i) for i in memory_ids]
         if not ids:
             return []
-        placeholders = ",".join("?" * len(ids))
+        by_id: dict[int, MemoryRecord] = {}
         with self._lock:
-            rows = self._conn.execute(
-                f"SELECT {_COLS} FROM memories WHERE id IN ({placeholders})", ids
-            ).fetchall()
-        by_id = {int(r[0]): _row_to_record(r, self.dim) for r in rows}
+            for start in range(0, len(ids), _SQL_CHUNK):
+                part = ids[start:start + _SQL_CHUNK]
+                placeholders = ",".join("?" * len(part))
+                rows = self._conn.execute(
+                    f"SELECT {_COLS} FROM memories WHERE id IN ({placeholders})", part
+                ).fetchall()
+                for r in rows:
+                    by_id[int(r[0])] = _row_to_record(r, self.dim)
         return [by_id[i] for i in ids if i in by_id]
 
     def iter_active(self, batch: int = 256) -> Iterator[MemoryRecord]:
@@ -619,6 +636,26 @@ class MemoryStore:
                 return
             for row in rows:
                 yield _row_to_record(row, self.dim)
+                last_id = int(row[0])
+
+    def iter_active_light(self, batch: int = 512) -> Iterator[tuple]:
+        """Порционная итерация (id, kind, created_at, last_reinforced_at,
+        base_strength, reinforced_count) активных следов — без декодирования
+        блобов эмбеддинга и SDR. Проходам «сна» (промоция/GC/метрики) нужна
+        только динамика следа; полный декодирует iter_active."""
+        last_id = 0
+        while True:
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT {_COLS_LIGHT} FROM memories WHERE status=? AND id>? "
+                    "ORDER BY id LIMIT ?",
+                    (STATUS_ACTIVE, last_id, int(batch)),
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield (int(row[0]), str(row[1]), float(row[2]), float(row[3]),
+                       float(row[4]), int(row[5]))
                 last_id = int(row[0])
 
     def all_active_ids(self) -> np.ndarray:
@@ -921,13 +958,15 @@ class MemoryStore:
             ).fetchall()
             if rows:
                 seqs = [r[0] for r in rows]
-                ph = ",".join("?" * len(seqs))
-                src_rows = con.execute(
-                    f"SELECT seq, mem_id FROM elig_sources WHERE seq IN ({ph})", seqs
-                ).fetchall()
                 by_seq: dict[int, list[int]] = {}
-                for seq, mid in src_rows:
-                    by_seq.setdefault(int(seq), []).append(int(mid))
+                for start in range(0, len(seqs), _SQL_CHUNK):
+                    part = seqs[start:start + _SQL_CHUNK]
+                    ph = ",".join("?" * len(part))
+                    src_rows = con.execute(
+                        f"SELECT seq, mem_id FROM elig_sources WHERE seq IN ({ph})", part
+                    ).fetchall()
+                    for seq, mid in src_rows:
+                        by_seq.setdefault(int(seq), []).append(int(mid))
                 con.execute("DELETE FROM eligibility")
             else:
                 by_seq = {}
@@ -941,6 +980,41 @@ class MemoryStore:
 
     # -- события (журнал пластичности) ---------------------------------------------------
 
+    # Счётчики наблюдаемости растут в транзакции каждого события, чтобы
+    # stats()/«сон» не делали полный json_extract-скан журнала. Ключи начинают
+    # существовать с первого bump; legacy-базы засеивает seed_obs_counters().
+    _OBS_ACTIONS = ("create", "reinforce", "link")
+
+    @staticmethod
+    def _bump_counter(con, key: str, delta: float = 1, *, is_float: bool = False) -> None:
+        if is_float:
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value=CAST(CAST(value AS REAL)+? AS TEXT)",
+                (key, repr(float(delta)), float(delta)),
+            )
+        else:
+            con.execute(
+                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
+                (key, str(int(delta)), int(delta)),
+            )
+
+    def _bump_obs_counters(self, con, event_type: str, data: dict) -> None:
+        if event_type == "write":
+            self._bump_counter(con, "obs_writes_total")
+            action = str(data.get("action", "unknown"))
+            if action in self._OBS_ACTIONS:
+                self._bump_counter(con, f"obs_action_{action}_total")
+        elif event_type == "recall":
+            self._bump_counter(con, "obs_recalls_total")
+            latency = data.get("latency_ms")
+            if latency is not None:
+                self._bump_counter(con, "obs_recall_ms_sum",
+                                   float(latency), is_float=True)
+
     def event_append(self, event_type: str, fields: dict | None = None, ts: float = 0.0) -> None:
         data = dict(fields or {})
         with self._txn() as con:
@@ -948,6 +1022,47 @@ class MemoryStore:
                 "INSERT INTO events(ts, type, data) VALUES(?,?,?)",
                 (float(ts), str(event_type), json.dumps(data, ensure_ascii=False)),
             )
+            self._bump_obs_counters(con, str(event_type), data)
+
+    def obs_counters(self) -> dict | None:
+        """Инкрементальные счётчики наблюдаемости; None — база ещё не засеяна."""
+        writes = self.get_meta("obs_writes_total")
+        recalls = self.get_meta("obs_recalls_total")
+        ms_sum = self.get_meta("obs_recall_ms_sum")
+        if writes is None or recalls is None or ms_sum is None:
+            return None
+        n_recalls = int(recalls)
+        return {
+            "writes": int(writes),
+            "recalls": n_recalls,
+            "avg_recall_ms": round(float(ms_sum) / n_recalls, 3) if n_recalls else 0.0,
+            "actions": {a: int(self.get_meta(f"obs_action_{a}_total") or 0)
+                        for a in self._OBS_ACTIONS},
+        }
+
+    def seed_obs_counters(self) -> dict:
+        """Однократный посев счётчиков сканом журнала (базы до их введения).
+
+        Гонка с параллельным bump стоит максимум пару событий точности —
+        это наблюдаемость, а не деньги; дальше счётчики монотонны.
+        """
+        actions = self.gate_decisions()
+        recalls, avg_ms = self.recall_stats()
+        rows = [
+            ("obs_writes_total", sum(actions.values())),
+            ("obs_recalls_total", recalls),
+            ("obs_recall_ms_sum", round(avg_ms * recalls, 3)),
+        ] + [(f"obs_action_{a}_total", actions.get(a, 0)) for a in self._OBS_ACTIONS]
+        with self._txn() as con:
+            for key, val in rows:
+                con.execute(
+                    "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(val)),
+                )
+        result = self.obs_counters()
+        assert result is not None  # посев выше обязан завести все ключи
+        return result
 
     def event_count(self) -> int:
         with self._lock:

@@ -133,7 +133,9 @@ class MemoryConfig:
 
     @classmethod
     def dev(cls) -> MemoryConfig:
-        """Малые размеры для тестов и демо (быстро, всё влезает в память ноутбука)."""
+        """Конфиг по умолчанию (hashing dim=256) — историческое имя для тестов
+        и демо: всё влезает в память ноутбука. Боевой профиль задаёт MCP-сервер
+        через recommended_thresholds эмбеддера."""
         return cls()
 
     def snapshot_fields(self) -> dict:

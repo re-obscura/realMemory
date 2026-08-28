@@ -134,7 +134,7 @@ class Hippocampus:
         self._rng = np.random.default_rng(self.config.sdr_seed + 2)
         self._unit_index: dict[int, set[int]] = {}
         self._edges_rev_seen = -1
-        self._trace_count = self.store.count()
+        self._trace_count = self.store.count(status=STATUS_ACTIVE)
         self._mem_rev_seen = self.store.memories_rev()
         # кэш эмбеддингов активных следов (точный скан): амортизированные буферы,
         # растут вдвое — вставка не копирует весь массив на каждом remember
@@ -415,17 +415,31 @@ class Hippocampus:
                     max(2, self.config.recall_oversample * 3), divisor=256,
                 )
                 probe_ids = [int(i) for i in ranked_ids[: min(cnt_link, budget)].tolist()]
+                # keyword-канал не терять и в точном режиме: за бюджетом префикса
+                # могут остаться почти-дубликаты с точными токенами (ID, коды)
+                probed = set(probe_ids)
+                for rid in self._fts_candidates(
+                    text or "", limit=max(4, self.config.recall_oversample * 3)
+                ):
+                    if rid not in probed:
+                        probe_ids.append(rid)
+                        probed.add(rid)
                 recs = self.store.get_many(probe_ids)
                 if recs:
                     qn = float(np.linalg.norm(emb))
                     qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
                     sims = np.stack([r.embedding for r in recs]) @ qv
-                    for rec, sim in zip(recs, sims.tolist()):
+                    # убывающий порядок по косинусу: первый прошедший фильтры —
+                    # лучший, семантика префиксного прохода сохраняется
+                    scored = sorted(
+                        ((max(0.0, s), rec) for rec, s in zip(recs, sims.tolist())),
+                        key=lambda t: -t[0],
+                    )
+                    for cos, rec in scored:
                         if rec.status != STATUS_ACTIVE:
                             continue
                         if not self._scope_allows(rec.scope, scope, all_scopes=False):
                             continue
-                        cos = max(0.0, sim)
                         if best_id is None:
                             best_id, best_cos = int(rec.id), cos
                         elif cos >= self.config.theta_link and len(near_ids) < 4:
@@ -658,9 +672,13 @@ class Hippocampus:
                             scope=old.scope)
         now = float(self.clock.now())
         self.store.mark_superseded(old_id, res.memory_id, now)
+        # протокол отзыва: исправленный факт больше не «стоит» за старым текстом —
+        # активные публикации старого следа получают tombstone (уедет при sync)
+        retracted_pubs = self.store.publication_retract(now, trace_ids=[old_id])
         self._bind_sdrs(old.sdr, self._sdr_of(res.memory_id),
                         strength=0.75, now=now, source_ids=(old_id, res.memory_id))
-        self.journal.append("supersede", old=old_id, new=res.memory_id, t=now)
+        self.journal.append("supersede", old=old_id, new=res.memory_id, t=now,
+                            publications_retracted=retracted_pubs)
         return res
 
     # -- чтение ---------------------------------------------------------------------
@@ -1015,21 +1033,27 @@ class Hippocampus:
             )
         self._reload_network_cache()
 
-        # один проход по активным следам решает обе судьбы: дозревшие эпизоды
+        # один лёгкий проход по активным следам (без декодирования блобов)
+        # решает обе судьбы и заодно собирает данные метрик: дозревшие эпизоды
         # повышаются до семантических, давно забытые ниже recall-пола удаляются
         promote_ids: list[int] = []
         forgotten_ids: list[int] = []
+        rets: list[float] = []
+        ages: list[float] = []
         grace_ok = now - self.config.gc_grace_below_floor_s
-        for rec in self.store.iter_active():
-            if should_promote(rec.kind, rec.reinforced_count, rec.created_at, now, self.config):
-                promote_ids.append(int(rec.id))
+        for tid, kind, created_at, last_reinforced_at, base, rcount in \
+                self.store.iter_active_light():
+            ret = retention(base, last_reinforced_at, now, kind, self.config)
+            rets.append(ret)
+            ages.append(max(0.0, now - created_at))
+            if should_promote(kind, rcount, created_at, now, self.config):
+                promote_ids.append(tid)
             elif (
                 self.config.gc_enabled
-                and rec.last_reinforced_at <= grace_ok
-                and retention(rec.base_strength, rec.last_reinforced_at, now,
-                              rec.kind, self.config) < self.config.min_retention_recall
+                and last_reinforced_at <= grace_ok
+                and ret < self.config.min_retention_recall
             ):
-                forgotten_ids.append(int(rec.id))
+                forgotten_ids.append(tid)
         for rid in promote_ids:
             promoted_rec = self.store.get(rid)
             if promoted_rec is not None:
@@ -1039,9 +1063,16 @@ class Hippocampus:
                 )
         if forgotten_ids:
             self.store.forget_traces(forgotten_ids)
+            # протокол отзыва: след забыт локально — активные публикации получают
+            # tombstone здесь, а не только при следующем sync (fail-safe для
+            # давно не синхронизировавшихся: решение уже видно в registry)
+            retracted_pubs = self.store.publication_retract(now,
+                                                            trace_ids=forgotten_ids)
             self._evict_forgotten(set(forgotten_ids))
-            self._trace_count = self.store.count()
+            self._trace_count = self.store.count(status=STATUS_ACTIVE)
             self._refresh_rev_marker()
+        else:
+            retracted_pubs = 0
         report = ConsolidationReport(
             edges_committed=committed,
             edges_pruned=pruned,
@@ -1049,11 +1080,14 @@ class Hippocampus:
             rewards_applied=rewards_applied,
             journal_pruned=journal_pruned,
             forgotten_traces=len(forgotten_ids),
+            publications_retracted=retracted_pubs,
             elapsed_ms=(_time.perf_counter() - t0) * 1000.0,
         )
         self.store.set_meta("last_consolidate_at", repr(now))
         self.journal.append("consolidate", **dataclasses.asdict(report))
-        self.journal.append("metrics", **self.metrics_snapshot(now=now))
+        # метрики из уже собранного скана: второй полный проход не нужен
+        self.journal.append("metrics", **self.metrics_snapshot(now=now,
+                                                               _scan=(rets, ages)))
         return report
 
     def _evict_forgotten(self, ids: set[int]) -> None:
@@ -1081,20 +1115,25 @@ class Hippocampus:
                 self._emb_pos[moved_id] = pos
             self._emb_len -= 1
 
-    def metrics_snapshot(self, now: float | None = None) -> dict[str, Any]:
+    def metrics_snapshot(self, now: float | None = None,
+                         _scan: tuple[list[float], list[float]] | None = None
+                         ) -> dict[str, Any]:
         """Полный срез состояния для анализа «со временем»: счётчики, гистерезис
         затухания, возраст следов. Вызывается на каждом consolidate(); те же
-        данные доступны по требованию (тул dream_log / CLI report)."""
+        данные доступны по требованию (тул dream_log / CLI report).
+        _scan — заранее собранные (retentions, ages) из прохода «сна»."""
         now = float(now) if now is not None else float(self.clock.now())
-        rets: list[float] = []
-        ages: list[float] = []
-        for rec in self.store.iter_active():
-            rets.append(
-                retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, self.config)
-            )
-            ages.append(max(0.0, now - rec.created_at))
-        r = np.asarray(rets, dtype=np.float64) if rets else np.empty(0)
-        a = np.asarray(ages, dtype=np.float64) if ages else np.empty(0)
+        if _scan is not None:
+            rets_l, ages_l = _scan
+        else:
+            rets_l = []
+            ages_l = []
+            for _tid, kind, created_at, last_reinforced_at, base, _rc in \
+                    self.store.iter_active_light():
+                rets_l.append(retention(base, last_reinforced_at, now, kind, self.config))
+                ages_l.append(max(0.0, now - created_at))
+        r = np.asarray(rets_l, dtype=np.float64) if rets_l else np.empty(0)
+        a = np.asarray(ages_l, dtype=np.float64) if ages_l else np.empty(0)
         day = 86400.0
         return {
             "ts": now,
@@ -1108,11 +1147,15 @@ class Hippocampus:
     # -- статистика ------------------------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
-        """Глобальная статистика из БД: одинакова для всех процессов в любой момент."""
+        """Глобальная статистика из БД: одинакова для всех процессов в любой момент.
+
+        Счётчики записей/recall берутся из инкрементальных db_meta-счётчиков
+        (растут в транзакции каждого события); базы до их введения засеиваются
+        одним сканом журнала при первом вызове."""
+        counters = self.store.obs_counters() or self.store.seed_obs_counters()
         decisions: dict[str, int] = {a.value: 0 for a in DecisionAction}
-        for act, n in self.store.gate_decisions().items():
+        for act, n in counters["actions"].items():
             decisions[act] = decisions.get(act, 0) + n
-        recalls, avg_recall_ms = self.store.recall_stats()
         edge_count, total_weight = self.store.edges_stats(
             float(self.clock.now()), self.config.tau_edge_stable
         )
@@ -1125,9 +1168,9 @@ class Hippocampus:
             "total_edge_weight": total_weight,
             "pending_eligibility": self.store.elig_pending(),
             "decisions": decisions,
-            "writes": sum(decisions.values()),
-            "recalls": recalls,
-            "avg_recall_ms": avg_recall_ms,
+            "writes": counters["writes"],
+            "recalls": counters["recalls"],
+            "avg_recall_ms": counters["avg_recall_ms"],
             "journal_events": self.store.event_count(),
         }
 
