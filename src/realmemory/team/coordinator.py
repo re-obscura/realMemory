@@ -26,25 +26,26 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hmac
 import json
 import sqlite3
+import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import traceback
 from pathlib import Path
 
+from ._http import (
+    BadRequest,
+    BoundedThreadingHTTPServer,
+    PayloadTooLarge,
+    TeamHandler,
+    cosine_scores,
+    decode_vector_b64,
+    finite_float,
+)
 from .policy import require_bind_token
 
 PRESENCE_TTL_S = 90.0
-
-
-def _b64decode_vec(s: str):
-    import numpy as np
-
-    raw = base64.b64decode(s)
-    return np.frombuffer(raw, dtype=np.float32)
 
 
 def _open_state(data_dir: Path) -> sqlite3.Connection:
@@ -118,8 +119,8 @@ class CoordinatorState:
                     " embedder, revoked_at) VALUES(?,?,?,?,?,?,?,?,NULL)",
                     (str(it["publication_id"]), str(it.get("project", "")),
                      str(it.get("author", "")), str(it.get("text", "")),
-                     base64.b64decode(it["embedding_b64"]),
-                     float(it["published_at"]),
+                     decode_vector_b64(it["embedding_b64"]).tobytes(),
+                     finite_float(it["published_at"], "published_at"),
                      str(it.get("content_hash", "")),
                      str(it.get("embedder", ""))),
                 )
@@ -142,8 +143,9 @@ class CoordinatorState:
                author: str | None, project: str | None) -> tuple[list[dict], dict]:
         """Топ-k по косинусу среди активных публикаций. Возвращает (хиты,
         мета); мета.nonempty_mismatch=True если кэш содержит записи других
-        эмбеддеров и сравнение было бы некорректным."""
-        q = _b64decode_vec(query_b64)
+        эмбеддеров и сравнение было бы некорректным. Строки с размерностью,
+        отличной от запроса, не сравнимы — пропускаются, а не роняют поиск."""
+        q = decode_vector_b64(query_b64)
         with self.lock:
             rows = self.con.execute(
                 "SELECT publication_id, project, author, text, embedding,"
@@ -160,13 +162,14 @@ class CoordinatorState:
             return [], {"error": "embedder_mismatch",
                         "known_embedders": known,
                         "requested": embedder}
-        scored = []
-        for pid, proj, auth, text, emb_blob, pub_at, emb_name in comparable:
-            import numpy as np
+        import numpy as np
 
-            vec = np.frombuffer(emb_blob, dtype=np.float32)
-            denom = float(np.linalg.norm(vec) * (np.linalg.norm(q) or 1.0))
-            score = float(np.dot(vec, q) / denom) if denom else 0.0
+        vecs = [np.frombuffer(r[4], dtype=np.float32) for r in comparable]
+        keep = [i for i, v in enumerate(vecs) if v.size == q.size]
+        scores = cosine_scores(q, [vecs[i] for i in keep])
+        scored = []
+        for score, i in zip(scores.tolist(), keep):
+            pid, proj, auth, text, _emb, pub_at, _name = comparable[i]
             scored.append({"publication_id": pid, "project": proj,
                            "author": auth, "text": text,
                            "published_at": pub_at, "score": round(score, 6)})
@@ -192,47 +195,8 @@ class CoordinatorState:
         }
 
 
-class CoordinatorHandler(BaseHTTPRequestHandler):
+class CoordinatorHandler(TeamHandler):
     server_version = "realmemory-coordinator/0.7"
-
-    @property
-    def state(self) -> CoordinatorState:
-        return self.server.state  # type: ignore[attr-defined]
-
-    @property
-    def expected_token(self) -> str | None:
-        return getattr(self.server, "token", None)  # type: ignore[attr-defined]
-
-    def log_message(self, fmt, *args):  # тихо: шум координатора не нужен
-        return
-
-    # -- служебное -------------------------------------------------------------
-
-    def _send(self, code: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _authorized(self) -> bool:
-        want = self.expected_token
-        if not want:
-            return True
-        got = self.headers.get("Authorization", "")
-        # сравнение с постоянным временем: токен — общий секрет команды
-        return hmac.compare_digest(got, f"Bearer {want}")
-
-    def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > 32 * 1024 * 1024:
-            return {}
-        try:
-            data = json.loads(self.rfile.read(length).decode("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (ValueError, UnicodeDecodeError):
-            return {}
 
     # -- маршруты --------------------------------------------------------------
 
@@ -254,7 +218,12 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if not self._authorized():
             return self._send(401, {"error": "unauthorized"})
-        payload = self._read_json()
+        try:
+            payload = self._read_json()
+        except PayloadTooLarge as exc:
+            return self._send(413, {"error": str(exc)})
+        except BadRequest as exc:
+            return self._send(400, {"error": str(exc)})
         try:
             if path == "/heartbeat":
                 self.state.heartbeat(str(payload.get("identity", "")),
@@ -281,16 +250,21 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                     payload.get("author"), payload.get("project"))
                 code = 409 if meta.get("error") == "embedder_mismatch" else 200
                 return self._send(code, {"hits": hits, **meta})
-        except (KeyError, ValueError, TypeError) as exc:
+        except (KeyError, TypeError) as exc:
             return self._send(400, {"error": f"bad request: {exc}"})
-        except Exception as exc:  # noqa: BLE001 - соединению нужен ответ ВСЕГДА
-            return self._send(500, {"error": f"internal: {exc!r}"})
+        except BadRequest as exc:
+            return self._send(400, {"error": str(exc)})
+        except ValueError as exc:
+            return self._send(400, {"error": f"bad request: {exc}"})
+        except Exception:  # noqa: BLE001 - соединению нужен ответ ВСЕГДА
+            traceback.print_exc(file=sys.stderr)
+            return self._send(500, {"error": "internal error"})
         return self._send(404, {"error": "not found"})
 
 
 def make_server(data_dir, host="127.0.0.1", port=8400, token=None):
     """Собрать сервер (для тестов: порт 0 → фактический из server_address)."""
-    srv = ThreadingHTTPServer((host, int(port)), CoordinatorHandler)
+    srv = BoundedThreadingHTTPServer((host, int(port)), CoordinatorHandler)
     srv.state = CoordinatorState(Path(data_dir))  # type: ignore[attr-defined]
     srv.token = token  # type: ignore[attr-defined]
     return srv

@@ -12,15 +12,23 @@
 """
 from __future__ import annotations
 
-import base64
-import hmac
-import json
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from ._http import (
+    BadRequest,
+    BoundedThreadingHTTPServer,
+    PayloadTooLarge,
+    TeamHandler,
+    cosine_scores,
+    decode_vector_b64,
+)
 from .policy import require_bind_token
+
+if TYPE_CHECKING:
+    from ..types import MemoryRecord
 
 HEARTBEAT_INTERVAL_S = 30.0
 
@@ -65,7 +73,8 @@ class PeerState:
         """Топ-k по косинусу среди активных публикаций владельца.
 
         Возвращает (хиты, имя эмбеддера владельца); сравнение паритетности —
-        на вызывавшей стороне/хендлере через исключение Mismatch."""
+        на вызывавшей стороне/хендлере через исключение Mismatch. Строки с
+        размерностью, отличной от запроса, несравнимы — пропускаются."""
         import numpy as np
 
         if embedder and self.embedder_name and embedder != self.embedder_name:
@@ -73,15 +82,19 @@ class PeerState:
         allowed = self.published_traces()
         if not allowed:
             return [], self.embedder_name
-        hits: list[dict] = []
-        qn = float(np.linalg.norm(query_vec))
+        qvec = np.asarray(query_vec, dtype=np.float32)
+        rows: list[tuple[MemoryRecord, np.ndarray]] = []
         for rec in self.store.get_many(sorted(allowed)):
             if project is not None and rec.scope != project:
                 continue
-            tid = int(rec.id or 0)
             vec = np.asarray(rec.embedding, dtype=np.float32)
-            denom = float(np.linalg.norm(vec)) * (qn or 1.0)
-            score = float(np.dot(vec, query_vec) / denom) if denom else 0.0
+            if vec.size != qvec.size:
+                continue  # битая/чужая строка: косинус имел бы нулевой смысл
+            rows.append((rec, vec))
+        scores = cosine_scores(qvec, [vec for _rec, vec in rows])
+        hits: list[dict] = []
+        for score, (rec, _vec) in zip(scores.tolist(), rows):
+            tid = int(rec.id or 0)
             hits.append({
                 "trace_id": tid, "text": rec.text,
                 "author": rec.author or "", "project": rec.scope,
@@ -101,35 +114,8 @@ class EmbedderMismatchPeer(Exception):
         self.requested = requested
 
 
-class PeerHandler(BaseHTTPRequestHandler):
+class PeerHandler(TeamHandler):
     server_version = "realmemory-peer/0.8"
-
-    @property
-    def state(self) -> PeerState:
-        return self.server.state  # type: ignore[attr-defined]
-
-    @property
-    def expected_token(self) -> str | None:
-        return getattr(self.server, "token", None)  # type: ignore[attr-defined]
-
-    def log_message(self, fmt, *args):  # тихий демон
-        return
-
-    def _send(self, code: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _authorized(self) -> bool:
-        want = self.expected_token
-        if not want:
-            return True
-        # сравнение с постоянным временем: токен — общий секрет команды
-        return hmac.compare_digest(self.headers.get("Authorization", ""),
-                                   f"Bearer {want}")
 
     def do_GET(self):
         if self.path.split("?")[0] == "/health":
@@ -145,39 +131,38 @@ class PeerHandler(BaseHTTPRequestHandler):
         if path != "/recall":
             return self._send(404, {"error": "not found"})
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length).decode("utf-8")) \
-                if length else {}
-            raw = base64.b64decode(str(payload.get("query_embedding_b64", "")))
-        except (ValueError, json.JSONDecodeError) as exc:
-            return self._send(400, {"error": f"bad request: {exc}"})
+            payload = self._read_json()
+        except PayloadTooLarge as exc:
+            return self._send(413, {"error": str(exc)})
+        except BadRequest as exc:
+            return self._send(400, {"error": str(exc)})
         try:
-            import numpy as np
-
             embedder = str(payload.get("embedder", ""))
             if not embedder:
                 # без имени эмбеддера сравнение бессмысленно: честный отказ
                 return self._send(400, {"error": "embedder required"})
-            qvec = np.frombuffer(raw, dtype=np.float32)
-            hits, _ = self.state.recall_live(
-                qvec, int(payload.get("k") or 5),
-                embedder, payload.get("project"))
+            qvec = decode_vector_b64(payload.get("query_embedding_b64", ""))
+            k = int(payload.get("k") or 5)
+        except (BadRequest, TypeError, ValueError) as exc:
+            return self._send(400, {"error": f"bad request: {exc}"})
+        try:
+            hits, _ = self.state.recall_live(qvec, k, embedder,
+                                             payload.get("project"))
             return self._send(200, {"hits": hits, "live": True})
         except EmbedderMismatchPeer as exc:
             return self._send(409, {"error": "embedder_mismatch",
                                     "known_embedders": exc.known,
                                     "requested": exc.requested})
-        except Exception as exc:  # noqa: BLE001 - соединению нужен ответ всегда
-            import sys
+        except Exception:  # noqa: BLE001 - соединению нужен ответ всегда
             import traceback
 
             traceback.print_exc(file=sys.stderr)
-            return self._send(500, {"error": f"internal: {exc!r}"})
+            return self._send(500, {"error": "internal error"})
 
 
 def make_peer_server(root, host="127.0.0.1", port=8410, token=None):
     require_bind_token(host, token, what="peer-endpoint")
-    srv = ThreadingHTTPServer((host, int(port)), PeerHandler)
+    srv = BoundedThreadingHTTPServer((host, int(port)), PeerHandler)
     srv.state = PeerState(Path(root))  # type: ignore[attr-defined]
     srv.token = token  # type: ignore[attr-defined]
     return srv

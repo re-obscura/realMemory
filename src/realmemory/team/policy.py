@@ -71,6 +71,15 @@ class TeamPolicy:
     ])
     raw: dict[str, Any] = field(default_factory=dict, repr=False,
                                 compare=False)
+    # ленивый кэш скомпилированных never-паттернов (classify на тысячах следов)
+    _never_compiled: list[re.Pattern] | None = field(
+        default=None, repr=False, compare=False)
+
+    def compiled_never_patterns(self) -> list[re.Pattern]:
+        """Компиляция один раз на инстанс: classify зовётся на пакетах следов."""
+        if self._never_compiled is None:
+            self._never_compiled = [re.compile(p) for p in self.never_text_patterns]
+        return self._never_compiled
 
     def project_rule(self, name: str) -> ProjectRule | None:
         for p in self.projects:
@@ -82,11 +91,17 @@ class TeamPolicy:
         return self.project_rule(name) is not None
 
     def kinds_for(self, rule: ProjectRule | None) -> list[str]:
-        return (rule.kinds if rule and rule.kinds else self.default_kinds)
+        # явные значения (включая пустой список = «никакие kinds») важнее
+        # дефолта; None — унаследовать глобальные
+        if rule is None or rule.kinds is None:
+            return self.default_kinds
+        return list(rule.kinds)
 
     def min_reinforcements_for(self, rule: ProjectRule | None) -> int:
-        return (rule.min_reinforcements if rule and rule.min_reinforcements
-                else self.default_min_reinforcements)
+        # 0 — легитимное значение («без минимума»), не подменять дефолтом
+        if rule is None or rule.min_reinforcements is None:
+            return self.default_min_reinforcements
+        return int(rule.min_reinforcements)
 
 
 @dataclass(frozen=True)
@@ -120,7 +135,9 @@ def load_policy(path: Path | None = None) -> TeamPolicy:
         elif isinstance(item, dict) and item.get("name"):
             policy.projects.append(ProjectRule(
                 name=str(item["name"]),
-                kinds=list(item["kinds"]) if item.get("kinds") else None,
+                # явный пустой список = «никакие kinds» — не путать с наследованием
+                kinds=([str(x) for x in item["kinds"]]
+                       if item.get("kinds") is not None else None),
                 min_reinforcements=(int(item["min_reinforcements"])
                                     if item.get("min_reinforcements") is not None
                                     else None),
@@ -154,7 +171,8 @@ def save_policy(policy: TeamPolicy, path: Path | None = None) -> Path:
     raw["default_kinds"] = policy.default_kinds
     raw["min_reinforcements"] = policy.default_min_reinforcements
     raw["projects"] = [
-        {"name": pr.name, **({"kinds": pr.kinds} if pr.kinds else {}),
+        {"name": pr.name,
+         **({"kinds": pr.kinds} if pr.kinds is not None else {}),
          **({"min_reinforcements": pr.min_reinforcements}
             if pr.min_reinforcements is not None else {})}
         for pr in policy.projects
@@ -196,13 +214,12 @@ def classify(rec, policy: TeamPolicy) -> ShareDecision:
     переопределяются ничем (fail-closed), затем eligibility-требования.
     """
     tid = int(rec.id or 0)
-    text_re = [re.compile(pat) for pat in policy.never_text_patterns]
     lowered_tags = {t.lower() for t in policy.never_meta_tags}
     hit_tags = _trace_tags(rec.meta) & lowered_tags
     if hit_tags:
         return ShareDecision(tid, BLOCKED_NEVER,
                              f"meta-тег(и): {', '.join(sorted(hit_tags))}")
-    for rex in text_re:
+    for rex in policy.compiled_never_patterns():
         if rex.search(rec.text or ""):
             return ShareDecision(tid, BLOCKED_NEVER,
                                  f"текст под never-паттерн {rex.pattern!r}")
@@ -224,10 +241,6 @@ def classify(rec, policy: TeamPolicy) -> ShareDecision:
         return ShareDecision(tid, LOW_REINFORCEMENTS,
                              f"подкреплений {rec.reinforced_count} < {need}")
     return ShareDecision(tid, ELIGIBLE)
-
-
-def compile_never_patterns(policy: TeamPolicy) -> list[re.Pattern]:
-    return [re.compile(x) for x in policy.never_text_patterns]
 
 
 def describe() -> str:  # pragma: no cover - справочная строка для CLI

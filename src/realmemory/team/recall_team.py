@@ -84,17 +84,38 @@ def _brain_meta(root_path) -> tuple[str, int]:
 def embed_query_text(root_path, text: str) -> tuple[object, str]:
     """Запрос кодируется ТЕМ ЖЕ эмбеддером, которым писался локальный мозг:
     имя берём из db_meta (оно же маркер собственных публикаций). Несовпадение
-    с чужими записями ловит получатель (peer/координатор) честным 409."""
+    с чужими записями ловит получатель (peer/координатор) честным 409.
+
+    Неизвестный эмбеддер — явная ошибка, а не молчаливый HashingEmbedder:
+    несовместимые векторы дали бы бессмысленный recall без единой ошибки."""
     name, dim = _brain_meta(root_path)
+    if not name:
+        # мозга ещё нет: локальный дефолт без модели, точное имя провайдера
+        from ..encoding.embedder import HashingEmbedder
+
+        embedder = HashingEmbedder(dim=dim)
+        return embedder.embed(text), embedder.name
     if name.startswith("fastembed:"):
         from ..encoding.embedder_local import FastEmbedProvider
 
         provider = FastEmbedProvider()
+        if provider.name != name:
+            raise RuntimeError(
+                f"база писалась эмбеддером {name!r}, а установленный "
+                f"fastembed даёт {provider.name!r} — синхронизируйте модель")
         return provider.embed_query(text), provider.name
-    from ..encoding.embedder import HashingEmbedder
+    if name.startswith("hashing("):
+        from ..encoding.embedder import HashingEmbedder
 
-    embedder = HashingEmbedder(dim=dim)
-    return embedder.embed(text), (name or f"hashing(dim={dim})")
+        embedder = HashingEmbedder(dim=dim)
+        if embedder.name != name:
+            raise RuntimeError(
+                f"база писалась эмбеддером {name!r}, а пересборка по dim={dim} "
+                f"даёт {embedder.name!r} — параметры hashing не совпадают")
+        return embedder.embed(text), embedder.name
+    raise RuntimeError(
+        f"командный recall не знает эмбеддер {name!r}: запустите team-слой "
+        "тем же движком, каким писался мозг, или добавьте реализацию")
 
 
 def _query_live_peers(presence, qvec, k, local_name, author, project,
@@ -147,8 +168,6 @@ def recall_team(root_path, query: str, *, k: int = 5,
     policy = policy or load_policy(policy_path)
     client = make_client(policy)
 
-    _, _brain_dim = _brain_meta(root_path)
-    del _brain_dim
     qvec, local_provider_name = embed_query_text(root_path, query)
 
     token = os.environ.get(policy.token_env or "", "").strip() or None
