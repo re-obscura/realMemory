@@ -8,4 +8,4 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-__all__ = ["run"]  # noqa: F822 - имя резолвится лениво через __getattr__ выше
+__all__ = ["run"]

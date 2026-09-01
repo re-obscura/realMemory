@@ -27,5 +27,7 @@ jobs:
         run: pip install -e ".[dev,mcp,team]"
       - name: Lint
         run: ruff check src tests
+      - name: Type check
+        run: mypy src/realmemory
       - name: Tests
         run: pytest

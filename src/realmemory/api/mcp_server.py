@@ -15,27 +15,27 @@ from typing import Any
 
 
 def _packet_to_dict(packet) -> dict[str, Any]:
-        return {
-            "query": packet.query,
-            "abstained": packet.abstained,
-            "latency_ms": round(packet.latency_ms, 2),
-            "items": [
-                {
-                    "id": it.memory_id,
-                    "text": it.text,
-                    "kind": it.kind,
-                    "cosine": it.cosine,
-                    "confidence": it.confidence,
-                    "retention": it.retention,
-                    "source": it.source,
-                    "scope": it.scope,
-                    "author": it.author,
-                    "created_at": it.created_at,
-                    "meta": dict(it.meta),
-                }
-                for it in packet.items
-            ],
-        }
+    return {
+        "query": packet.query,
+        "abstained": packet.abstained,
+        "latency_ms": round(packet.latency_ms, 2),
+        "items": [
+            {
+                "id": it.memory_id,
+                "text": it.text,
+                "kind": it.kind,
+                "cosine": it.cosine,
+                "confidence": it.confidence,
+                "retention": it.retention,
+                "source": it.source,
+                "scope": it.scope,
+                "author": it.author,
+                "created_at": it.created_at,
+                "meta": dict(it.meta),
+            }
+            for it in packet.items
+        ],
+    }
 
 
 def build_server(hippo, default_project: str | None = None,

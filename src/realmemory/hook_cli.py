@@ -246,10 +246,13 @@ def _force_utf8_streams() -> None:
     (cp1252 и т.п.), и кириллица в брифе/ошибке падает UnicodeEncodeError.
     Контракт вывода — UTF-8, так что выставляем его принудительно."""
     for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # не-TextIO обёртки (capture, редкие пайпы) — как есть
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, OSError, ValueError):
-            pass  # не-TextIO обёртки (capture, редкие пайпы) — оставляем как есть
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 
 def main(argv=None) -> None:

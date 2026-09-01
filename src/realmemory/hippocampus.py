@@ -431,11 +431,11 @@ class Hippocampus:
                     sims = np.stack([r.embedding for r in recs]) @ qv
                     # убывающий порядок по косинусу: первый прошедший фильтры —
                     # лучший, семантика префиксного прохода сохраняется
-                    scored = sorted(
+                    ranked_pairs = sorted(
                         ((max(0.0, s), rec) for rec, s in zip(recs, sims.tolist())),
                         key=lambda t: -t[0],
                     )
-                    for cos, rec in scored:
+                    for cos, rec in ranked_pairs:
                         if rec.status != STATUS_ACTIVE:
                             continue
                         if not self._scope_allows(rec.scope, scope, all_scopes=False):
