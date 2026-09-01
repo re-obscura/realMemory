@@ -8,12 +8,13 @@ A persistent memory layer for LLM agents with continuous learning: a local
 "hippocampal" memory that writes without re-indexing, forgets via trace
 dynamics, and consolidates episodes into semantics during "sleep".
 
-**Status: v0.8 — retrieval defaults to an exact cosine scan over an in-process
+**Status: v0.8.3 — retrieval defaults to an exact cosine scan over an in-process
 embedding cache (complete recall, no candidate-generation ceiling), one SQLite
 store shared by all processes, global/project memory scopes, hybrid FTS5
 search, thresholds calibrated on real text; explicit team sharing on top
 (local registry with tombstones, passive coordinator, live peer-to-peer,
-fail-closed network defaults).**
+fail-closed network defaults), with the network layer hardened: request body
+limits, strict input validation, bounded thread pools.**
 
 ## The idea in a nutshell
 
@@ -42,6 +43,8 @@ The LLM stays frozen ("cortex"). realMemory is a separate mutable module
 
 ```bash
 pip install -e ".[dev]"
+ruff check src tests  # lint
+mypy src/realmemory   # type check (enforced in CI)
 pytest                # full core test suite
 python -m realmemory.eval.bench_recall --facts 1500 --queries 200   # synthetic
 python -m realmemory.eval.bench_real                                # real-text (fastembed)
@@ -181,7 +184,24 @@ A close fact recorded under a DIFFERENT author never reinforces that
 trace — it links instead, keeping both viewpoints attributable. Cross-process
 writes propagate through a `memories_rev` revision counter (volatile caches
 resync lazily at the next recall/remember). The MCP-tool `recall_team` exists only when the policy sets a
-coordinator. See [`docs/TEAM.md`](docs/TEAM.md); full team setup & operations
+coordinator.
+
+**Network hardening (v0.8.3)**: both daemons share one HTTP harness with a
+32 MB request-body limit (a peer reading unbounded `Content-Length` would be
+an OOM DoS), strict JSON (NaN/Infinity and non-object bodies answer a clean
+400, malformed vectors never crash a search), a bounded thread pool (32
+concurrent handlers), and no exception details in 500 responses. The team
+recall encodes queries with the exact embedder the local brain was written
+by — an unknown embedder is a loud error, never a silent fallback to
+incomparable vectors. In `team.yaml`, explicit `min_reinforcements: 0` and
+`kinds: []` are respected as values; only `None` inherits the defaults.
+
+Known limitation: daemons speak plaintext HTTP on the LAN (the shared token
+and published content are sniffable in transit). This is acceptable for a
+trusted team network; run the coordinator on loopback or behind an encrypted
+channel otherwise.
+
+See [`docs/TEAM.md`](docs/TEAM.md); full team setup & operations
 guide in [`docs/SETUP.md`](docs/SETUP.md).
 
 ## Observability ("how the memory behaves over time")
@@ -240,8 +260,9 @@ default thresholds on real text merged almost everything into blobs — the
 calibration still lives in per-embedder profiles, and the gate-merge share
 is published rather than hidden inside the hit rate.
 
-Tests: **178 collected — 177 passed**, the headless TUI smoke skips when the
-`[team]` extra (Textual) is not installed.
+Tests: **187 passed**, ruff and mypy clean and enforced in CI (2 OS ×
+4 Python matrix); the headless TUI smoke skips when the `[team]` extra
+(Textual) is not installed.
 
 ## Architecture
 
@@ -266,6 +287,7 @@ src/realmemory/
 ├── core/         # L1 SDRVotingIndex, L2 AssemblyNetwork, plasticity
 ├── policies/     # novelty gate, trace decay/promotion
 ├── store/        # SQLite storage (traces, edges, eligibility, events)
+├── team/         # sharing: registry, policy, coordinator, peer, sync, TUI
 ├── api/          # MCP server
 └── eval/         # benchmarks
 ```
