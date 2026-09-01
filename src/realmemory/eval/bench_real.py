@@ -103,7 +103,7 @@ def _run(
         qtype = q["type"]
 
         qv = np.asarray(embedder.embed_query(q["q"]), dtype=np.float32)
-        qv /= max(np.linalg.norm(qv), 1e-9)
+        qv /= float(max(np.linalg.norm(qv), 1e-9))
         row_sims = emb @ qv
         expect_idx = index_of[q["expect"]] if qtype != "noise" else None
         target_cos = (
