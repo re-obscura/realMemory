@@ -103,7 +103,10 @@ def _run(
         qtype = q["type"]
 
         qv = np.asarray(embedder.embed_query(q["q"]), dtype=np.float32)
-        qv /= float(max(np.linalg.norm(qv), 1e-9))
+        # без builtin max: на части mypy/numpy-комбинаций его вывод — union,
+        # не приводимый к float; EPS-пол уже заодно и с делением на ноль
+        norm = float(np.linalg.norm(qv))
+        qv /= norm if norm > 1e-9 else 1e-9
         row_sims = emb @ qv
         expect_idx = index_of[q["expect"]] if qtype != "noise" else None
         target_cos = (
