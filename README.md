@@ -8,13 +8,17 @@ A persistent memory layer for LLM agents with continuous learning: a local
 "hippocampal" memory that writes without re-indexing, forgets via trace
 dynamics, and consolidates episodes into semantics during "sleep".
 
-**Status: v0.8.3 — retrieval defaults to an exact cosine scan over an in-process
+**Status: v0.9.0 — retrieval defaults to an exact cosine scan over an in-process
 embedding cache (complete recall, no candidate-generation ceiling), one SQLite
-store shared by all processes, global/project memory scopes, hybrid FTS5
+store shared by all processes, global/project memory scopes with canonical
+spelling (variants converge instead of splitting a project), hybrid FTS5
 search, thresholds calibrated on real text; explicit team sharing on top
 (local registry with tombstones, passive coordinator, live peer-to-peer,
 fail-closed network defaults), with the network layer hardened: request body
-limits, strict input validation, bounded thread pools.**
+limits, strict input validation, bounded thread pools. Hardened by a 6-week
+dogfood retrospective: the session brief now warns when identity facts fade,
+`revise(kind=...)` can convert a fading episodic preference into a durable
+semantic one, and every "sleep" checkpoints the WAL.**
 
 ## The idea in a nutshell
 
@@ -260,7 +264,7 @@ default thresholds on real text merged almost everything into blobs — the
 calibration still lives in per-embedder profiles, and the gate-merge share
 is published rather than hidden inside the hit rate.
 
-Tests: **187 passed**, ruff and mypy clean and enforced in CI (2 OS ×
+Tests: **195 passed**, ruff and mypy clean and enforced in CI (2 OS ×
 4 Python matrix); the headless TUI smoke skips when the `[team]` extra
 (Textual) is not installed.
 
