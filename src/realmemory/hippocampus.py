@@ -571,8 +571,11 @@ class Hippocampus:
             raise ValueError(f"kind должен быть '{KIND_EPISODIC}' или '{KIND_SEMANTIC}'")
         if not isinstance(scope, str) or not _NAMESPACE_RE.fullmatch(scope):
             raise ValueError(
-                "scope: 1–64 символа из [A-Za-z0-9_.-], первый — буква или цифра"
+                "scope: 1–64 символов из [A-Za-z0-9_.-], первый — буква или цифра"
             )
+        # вариант написания сходится к уже живущему скоупу: регистр и
+        # разделители не должны расщеплять проект на невидимые друг другу
+        scope = self.store.canonical_scope(scope)
         related_ids = tuple(dict.fromkeys(int(i) for i in related_ids))
         known: dict[int, MemoryRecord] = {}
         for rid in related_ids:
@@ -663,12 +666,21 @@ class Hippocampus:
         old_id: int,
         new_text: str,
         meta: dict[str, Any] | None = None,
+        kind: str | None = None,
     ) -> WriteResult:
+        """Исправить след. kind по умолчанию наследуется от старого следа;
+        явный kind меняет тип — единственный легальный путь перевести
+        эпизод в semantic (забывание тормозится в 20 раз), вручную
+        записать «ту же мысль» другим типом гейт не даст (REINFORCE)."""
         old = self.store.get(old_id)
         if old is None:
             raise KeyError(f"след {old_id} не существует")
+        if kind is None:
+            kind = old.kind
+        if kind not in (KIND_EPISODIC, KIND_SEMANTIC):
+            raise ValueError(f"kind должен быть '{KIND_EPISODIC}' или '{KIND_SEMANTIC}'")
         merged_meta = {**old.meta, **(meta or {}), "supersedes": int(old_id)}
-        res = self.remember(new_text, kind=old.kind, meta=merged_meta, force_new=True,
+        res = self.remember(new_text, kind=kind, meta=merged_meta, force_new=True,
                             scope=old.scope)
         now = float(self.clock.now())
         self.store.mark_superseded(old_id, res.memory_id, now)
@@ -696,6 +708,8 @@ class Hippocampus:
         scope=None или all_scopes=True — вся память без фильтра."""
         t0 = _time.perf_counter()
         self._resync_traces_if_changed()
+        if scope is not None:
+            scope = self.store.canonical_scope(scope)
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query должен быть непустой строкой")
         if k < 1:
@@ -1088,6 +1102,9 @@ class Hippocampus:
         # метрики из уже собранного скана: второй полный проход не нужен
         self.journal.append("metrics", **self.metrics_snapshot(now=now,
                                                                _scan=(rets, ages)))
+        # WAL возвращается в основную базу, пока читателей нет: без этого
+        # при одном долгоживущем процессе журнал растёт неограниченно
+        self.store.wal_checkpoint()
         return report
 
     def _evict_forgotten(self, ids: set[int]) -> None:

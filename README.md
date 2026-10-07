@@ -101,7 +101,7 @@ Register a user-scope stdio server in your client config:
 
 Agent tools (named as cognitive actions): `recall(query,k,project)` ·
 `memorize(text,kind,related_ids,project)` · `reflect(memory_ids,reward)` ·
-`revise(old_id,new_text)` · `introspect()` · `dream_log()`.
+`revise(old_id,new_text,kind)` · `introspect()` · `dream_log()`.
 
 **Shared + per-project memory**: every trace is tagged with a scope — `global`
 (preferences, identity) or a project name. The project is detected

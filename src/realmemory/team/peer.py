@@ -79,6 +79,8 @@ class PeerState:
 
         if embedder and self.embedder_name and embedder != self.embedder_name:
             raise EmbedderMismatchPeer([self.embedder_name], embedder)
+        if project is not None:
+            project = self.store.canonical_scope(str(project))
         allowed = self.published_traces()
         if not allowed:
             return [], self.embedder_name

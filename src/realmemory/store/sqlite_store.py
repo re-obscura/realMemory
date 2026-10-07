@@ -302,6 +302,16 @@ _FTS_STATEMENTS = (
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
+# ключ канонического сравнения скоупов: регистр и разновид разделителей
+# («CPM.Backend», «cpm_backend», «cpm backend») не должны расщеплять проект —
+# на живых данных догфудинга один проект жил под тремя именами, и recall
+# между ними не пересекался
+_SCOPE_KEY_RE = re.compile(r"[._\- ]+")
+
+
+def scope_key(name: str) -> str:
+    return _SCOPE_KEY_RE.sub(".", str(name).casefold())
+
 
 def tokenize(text: str) -> list[str]:
     """Токены для keyword-канала: слова в нижнем регистре (unicode)."""
@@ -689,6 +699,35 @@ class MemoryStore:
                 "SELECT scope, COUNT(*) FROM memories WHERE status='active' GROUP BY scope"
             ).fetchall()
         return {str(s): int(n) for s, n in rows}
+
+    def canonical_scope(self, name: str) -> str:
+        """Существующий скоуп с тем же каноническим ключом, иначе имя как есть.
+
+        При нескольких совпадающих вариантах выигрывает самый населённый
+        (стабильно и предсказуемо) — так «cpm_backend» сходится к уже
+        живущему «CPM.Backend», а не плодит второй вариант."""
+        key = scope_key(name)
+        if not key:
+            return name
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT scope, COUNT(*) AS n FROM memories"
+                " WHERE status='active' GROUP BY scope"
+            ).fetchall()
+        best: tuple[int, str] | None = None
+        for scope, n in rows:
+            if scope_key(str(scope)) == key:
+                cand = (int(n), str(scope))
+                if best is None or cand > best:
+                    best = cand
+        return best[1] if best else name
+
+    def wal_checkpoint(self) -> None:
+        """Пассивный чекпойнт WAL: не блокирует никого, но возвращает
+        журнал в основную базу, когда читателей нет. Без давления снаружи
+        (один долгоживущий MCP-процесс) WAL рос вдвое больше самой базы."""
+        with self._lock:
+            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def top_by_reinforcements(self, limit: int = 10) -> list[MemoryRecord]:
         """Самые подкреплённые активные следы (для отчёта)."""

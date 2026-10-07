@@ -76,6 +76,7 @@ def _resolve_hook_root(root: Path, namespace: str | None) -> Path:
 
 
 _BRIEF_BUDGET_CHARS = 600  # бюджет фактов в additionalContext, кроме шапки
+_FADING_WARN_RETENTION = 0.25  # порог тревоги для глобальных (identity) фактов
 
 
 def cmd_brief(args) -> int:
@@ -88,12 +89,16 @@ def cmd_brief(args) -> int:
     try:
         now = float(hippo.clock.now())
         project = resolve_project(getattr(args, "project", None))
+        if project is not None:
+            # вариант написания сходится к живущему скоупу (см. canonical_scope)
+            project = hippo.store.canonical_scope(project)
 
         def in_scope(rec_scope: str) -> bool:
             return project is None or rec_scope == project or rec_scope == "global"
 
         semantic: list[tuple[float, int, str]] = []
         episodic: list[tuple[float, float, str]] = []
+        fading_global: list[str] = []
         for rec in hippo.store.iter_active():
             if not in_scope(rec.scope):
                 continue
@@ -105,6 +110,10 @@ def cmd_brief(args) -> int:
                 # проекта показываем раньше одноразовых заметок
                 score = ret * (1.0 + math.log1p(rec.reinforced_count))
                 episodic.append((score, ret, rec.text))
+            # identity-предпочтения живут в global: их угасание — не фильтр
+            # фокуса, а потеря главного; предупреждаем до того, как GC удалит
+            if rec.scope == "global" and ret < _FADING_WARN_RETENTION:
+                fading_global.append(rec.text)
         semantic.sort(key=lambda t: (-t[0], -t[1]))
         episodic.sort(key=lambda t: (-t[0], -t[1]))
 
@@ -144,6 +153,14 @@ def cmd_brief(args) -> int:
             used += len(line)
             added_epi += 1
         ctx = "\n".join(lines)
+        if fading_global:
+            sample = fading_global[0][:60]
+            ctx += (
+                f"\n[realMemory] WARNING: {len(fading_global)} глобальных фактов"
+                f" угасают (retention < {_FADING_WARN_RETENTION}), например:"
+                f" «{sample}…». Подкрепите их reflect-ом или переведите в"
+                " semantic через revise(kind='semantic'), иначе GC удалит их."
+            )
         if args.plain:
             print(ctx)
             return 0

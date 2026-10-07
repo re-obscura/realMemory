@@ -132,15 +132,19 @@ def build_server(hippo, default_project: str | None = None,
         return json.dumps({"touched": n}, ensure_ascii=False)
 
     @mcp.tool()
-    def revise(old_id: int, new_text: str) -> str:
+    def revise(old_id: int, new_text: str, kind: str | None = None) -> str:
         """Correct a memory whose reality has changed ("we now use X instead of Y").
 
         The outdated trace is kept as linked history and excluded from future
         recalls; nothing is silently lost. The replacement inherits the old
-        trace's project scope. Returns {old_id, new_id}.
+        trace's project scope. Pass kind="semantic" to convert an episodic
+        preference/fact into a slow-decaying semantic one (recommended for
+        durable user preferences and identity facts before they fade).
+        Returns {old_id, new_id}.
         """
-        res = hippo.update_fact(int(old_id), new_text)
-        return json.dumps({"old_id": int(old_id), "new_id": res.memory_id},
+        res = hippo.update_fact(int(old_id), new_text, kind=kind)
+        return json.dumps({"old_id": int(old_id), "new_id": res.memory_id,
+                           "kind": kind or "inherited"},
                           ensure_ascii=False)
 
     if team_enabled:
