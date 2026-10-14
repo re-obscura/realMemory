@@ -336,9 +336,14 @@ class MemoryStore:
                 return None
         dest_dir = Path(dest_dir) if dest_dir else self.path.parent / "backups"
         dest_dir.mkdir(parents=True, exist_ok=True)
-        # миллисекунды в суффиксе: две консолидации в одну секунду не делят имя
-        stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{int(now * 1000) % 1000:03d}"
-        dest = dest_dir / f"memory-{stamp}.db"
+        # миллисекунды в суффиксе: две консолидации в одну секунду не делят имя.
+        # На быстрой машине обе могут влететь в одну миллисекунду — суффикс
+        # сдвигается до свободного имени, гарантия различимости держится
+        seq = int(now * 1000) % 1000
+        dest = dest_dir / f"memory-{time.strftime('%Y%m%d-%H%M%S')}-{seq:03d}.db"
+        while dest.exists():
+            seq = (seq + 1) % 1000
+            dest = dest_dir / f"memory-{time.strftime('%Y%m%d-%H%M%S')}-{seq:03d}.db"
         with self._lock:
             out = sqlite3.connect(str(dest))
             try:
