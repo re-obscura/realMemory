@@ -1,6 +1,6 @@
 # realMemory Module Contracts
 
-Status: v0.9.0. This document fixes public interfaces. Rule: any change to a
+Status: v0.10.0. This document fixes public interfaces. Rule: any change to a
 public API signature requires editing this file in the same commit. Anything
 not described here is private and may change freely. The team-sharing layer
 (registry, policy, transport, TUI) is contracted separately in

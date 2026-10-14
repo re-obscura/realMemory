@@ -8,17 +8,24 @@ A persistent memory layer for LLM agents with continuous learning: a local
 "hippocampal" memory that writes without re-indexing, forgets via trace
 dynamics, and consolidates episodes into semantics during "sleep".
 
-**Status: v0.9.0 — retrieval defaults to an exact cosine scan over an in-process
-embedding cache (complete recall, no candidate-generation ceiling), one SQLite
-store shared by all processes, global/project memory scopes with canonical
-spelling (variants converge instead of splitting a project), hybrid FTS5
-search, thresholds calibrated on real text; explicit team sharing on top
-(local registry with tombstones, passive coordinator, live peer-to-peer,
-fail-closed network defaults), with the network layer hardened: request body
-limits, strict input validation, bounded thread pools. Hardened by a 6-week
-dogfood retrospective: the session brief now warns when identity facts fade,
-`revise(kind=...)` can convert a fading episodic preference into a durable
-semantic one, and every "sleep" checkpoints the WAL.**
+**Status: v0.10.0 — modernized internals, same behavior: the store is split
+into schema/rows/sql modules, the recall scorer is pinned by a golden
+snapshot test, `MemoryRecord.id` is non-Optional (mypy overrides removed),
+multi-process reinforcement is transactionally atomic (no lost updates),
+cache invalidation consumes the in-transaction revision, dead test-only
+public API removed (`BipolarProjector`, `EligibilityLog.reward`,
+`SDRVotingIndex.state_dict`). Retrieval defaults to an exact cosine scan over
+an in-process embedding cache (complete recall, no candidate-generation
+ceiling), one SQLite store shared by all processes, global/project memory
+scopes with canonical spelling (variants converge instead of splitting a
+project), hybrid FTS5 search, thresholds calibrated on real text; explicit
+team sharing on top (local registry with tombstones, passive coordinator,
+live peer-to-peer, fail-closed network defaults), with the network layer
+hardened: request body limits, strict input validation, bounded thread
+pools. Hardened by a 6-week dogfood retrospective: the session brief now
+warns when identity facts fade, `revise(kind=...)` can convert a fading
+episodic preference into a durable semantic one, and every "sleep"
+checkpoints the WAL.**
 
 ## The idea in a nutshell
 
