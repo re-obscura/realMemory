@@ -117,6 +117,9 @@ class MemoryStore:
         self.path = Path(path)
         self.dim = int(dim)
         self._lock = threading.Lock()
+        # ревизия последней СОБСТВЕННОЙ мутации следов (см. bump_memories_rev);
+        # None — собственных мутаций ещё не было
+        self._last_mem_rev: int | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._conn = sqlite3.connect(str(self.path), check_same_thread=False,
@@ -615,10 +618,26 @@ class MemoryStore:
         val = self.get_meta("memories_rev")
         return int(val) if val is not None else -1
 
-    @staticmethod
-    def bump_memories_rev(con: sqlite3.Connection) -> None:
-        """Поднять счётчик ВНУТРИ текущей транзакции мутации следов."""
+    @property
+    def last_mem_rev(self) -> int | None:
+        """Ревизия, выставленная последней СОБСТВЕННОЙ мутацией следов.
+
+        Значение берётся из транзакции мутации (bump_memories_rev), а не
+        перечитыванием базы после COMMIT: в окне между коммитом и чтением
+        мог влететь чужой bump — перечитывание поглощало его, и чужие
+        записи оставались невидимыми для кэшей до следующей чужой мутации.
+        None — собственных мутаций ещё не было."""
+        return self._last_mem_rev
+
+    def bump_memories_rev(self, con: sqlite3.Connection) -> int:
+        """Поднять счётчик ВНУТРИ текущей транзакции мутации следов;
+        запомнить новую ревизию для last_mem_rev и вернуть её."""
         _bump_meta(con, "memories_rev")
+        (val,) = con.execute(
+            "SELECT value FROM db_meta WHERE key='memories_rev'"
+        ).fetchone()
+        self._last_mem_rev = int(val)
+        return self._last_mem_rev
 
     def edges_rev(self) -> int:
         """Версия рёбер: растёт при любой их мутации (инвалидация CSR-кэша фасада)."""

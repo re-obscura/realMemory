@@ -289,6 +289,14 @@ class MemoryStore(path, dim):                        # context manager; WAL + bu
     def get_meta(key) -> str | None / set_meta(key, value)
     def bump_meta_int(key, delta=1) -> int                   # atomic increment, returns new value
     def consume_meta_int(key) -> int                         # read and reset to zero
+    def memories_rev() -> int                                # trace-set version for cache invalidation
+                                                             # (-1 until first bump, legacy bases)
+    def last_mem_rev -> int | None                           # property: the revision set by THIS
+                                                             # process's last trace mutation, taken
+                                                             # from inside its transaction (never
+                                                             # re-read after COMMIT — a foreign bump
+                                                             # landing in that window must stay
+                                                             # visible); None before any own mutation
     # L2 edges (table edges: key=src*n_units+dst)
     def edges_rev() -> int                                   # version for CSR-cache invalidation
     def edges_load() -> (keys int64, ws float32)             # sorted by key

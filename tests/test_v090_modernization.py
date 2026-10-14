@@ -133,3 +133,60 @@ def test_feedback_two_instances_no_loss(tmp_path, tiny_cfg, clock):
     finally:
         h1.close()
         h2.close()
+
+
+def test_promote_only_consolidation_no_rebuild(tmp_path, tiny_cfg, clock):
+    """«Сон» с одними промоциями (без забывания) обязан обновлять маркер
+    ревизии: раньше он жил только в ветке забывания, и следующий
+    remember/recall платил лишнюю O(N)-пересборку кэшей."""
+    h = Hippocampus.open(tmp_path / "rm", config=tiny_cfg, clock=clock)
+    try:
+        for _ in range(6):
+            h.remember("plimso pt9 suvat", scope="proj")
+        clock.advance(3000)
+        rebuilds = []
+        original = h._reindex_all
+        h._reindex_all = lambda: (rebuilds.append(1), original())  # type: ignore[method-assign]
+        report = h.consolidate()
+        assert report.promoted_to_semantic >= 1, "сценарий обязан повышать след"
+        assert not rebuilds, "консолидация сама не пересобирает кэши"
+        h.remember("свежий факт после сна", scope="proj")
+        assert not rebuilds, "после промоции пересборка не требуется"
+    finally:
+        h.close()
+
+
+def test_own_mutation_marker_consumes_in_transaction_revision(tmp_path, tiny_cfg, clock):
+    """Маркер собственной мутации берётся из транзакции, а не перечитыванием
+    базы: чужой bump в окне между COMMIT и чтением не должен поглощаться
+    (иначе чужие записи остаются невидимыми до следующей чужой мутации)."""
+    h = Hippocampus.open(tmp_path / "rm", config=tiny_cfg, clock=clock)
+    try:
+        res = h.remember("факт один", scope="proj")
+        base_rev = h.store.memories_rev()
+        # имитируем чужой commit, влетевший в окно перечитывания маркера
+        h.store.memories_rev = lambda: base_rev + 1000  # type: ignore[method-assign]
+        h.feedback([res.memory_id], 1.0)
+        assert h._mem_rev_seen == base_rev + 1, (
+            "маркер обязан взять ревизию своей транзакции, а не фантомную"
+        )
+    finally:
+        h.close()
+
+
+def test_reinforce_remember_does_not_schedule_rebuild(tmp_path, tiny_cfg, clock):
+    """remember, решившийся в REINFORCE, поднимает ревизию той же транзакцией
+    и обязан зафиксировать маркер: раньше ветка не обновляла его вовсе, и
+    каждый следующий remember/recall после подкрепления платил O(N)-пересборку."""
+    h = Hippocampus.open(tmp_path / "rm", config=tiny_cfg, clock=clock)
+    try:
+        h.remember("plimso pt9 suvat", scope="proj")  # пустая база -> CREATE
+        second = h.remember("plimso pt9 suvat", scope="proj")
+        assert not second.created and second.decision.action.value == "reinforce"
+        rebuilds = []
+        original = h._reindex_all
+        h._reindex_all = lambda: (rebuilds.append(1), original())  # type: ignore[method-assign]
+        h.remember("plimso pt9 suvat", scope="proj")
+        assert not rebuilds, "после собственного REINFORCE пересборка не требуется"
+    finally:
+        h.close()

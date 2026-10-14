@@ -386,8 +386,11 @@ class Hippocampus:
 
     def _refresh_rev_marker(self) -> None:
         """После СОБСТВЕННОЙ мутации следа счётчик уже поднят той же
-        транзакцией — фиксируем значение, чтобы не пересобирать кэш зря."""
-        self._mem_rev_seen = self.store.memories_rev()
+        транзакцией — фиксируем её значение, чтобы не пересобирать кэш зря
+        и не поглотить чужой bump, влетевший между COMMIT и чтением."""
+        rev = self.store.last_mem_rev
+        if rev is not None:
+            self._mem_rev_seen = rev
 
     def _sync_network_cache(self) -> None:
         """Чужие процессы могли доконсолидировать рёбра — обновляем кэш по версии."""
@@ -665,6 +668,9 @@ class Hippocampus:
             if best_id is None:  # инвариант гейта: REINFORCE бывает только при цели
                 raise RuntimeError("REINFORCE без целевого следа")
             self._reinforce(best_id, now)
+            # подкрепление подняло ревизию той же транзакцией — фиксируем,
+            # иначе следующий remember/recall платит лишнюю O(N)-пересборку
+            self._refresh_rev_marker()
             mid = best_id
             created = False
         elif action is DecisionAction.LINK:
@@ -1090,9 +1096,14 @@ class Hippocampus:
                                                             trace_ids=forgotten_ids)
             self._evict_forgotten(set(forgotten_ids))
             self._trace_count = self.store.count(status=STATUS_ACTIVE)
-            self._refresh_rev_marker()
         else:
             retracted_pubs = 0
+        if promote_ids or forgotten_ids:
+            # собственные мутации были: маркер ревизии — из их транзакции.
+            # Раньше рефреш жил только в ветке забывания, и «сон» с одними
+            # промоциями оставлял маркер устаревшим — следующий
+            # remember/recall платил лишнюю O(N)-пересборку кэшей
+            self._refresh_rev_marker()
         report = ConsolidationReport(
             edges_committed=committed,
             edges_pruned=pruned,
