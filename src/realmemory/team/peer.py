@@ -53,10 +53,10 @@ class PeerState:
 
     def __init__(self, root: Path) -> None:
         from ..config import MemoryConfig
-        from ..hook_cli import _infer_dim, _load_cfg
-        from ..store.sqlite_store import MemoryStore
+        from ..store import MemoryStore, read_meta
 
-        cfg = _load_cfg(root) or MemoryConfig(dim=_infer_dim(root))
+        meta = read_meta(root)
+        cfg = meta.config or MemoryConfig(dim=meta.dim)
         self.store = MemoryStore(root / "memory.db", dim=cfg.dim)
         self.embedder_name = self.store.get_meta("embedder") or ""
 

@@ -26,11 +26,16 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..types import STATUS_ACTIVE, MemoryRecord
+
+if TYPE_CHECKING:
+    from ..config import MemoryConfig
 from ._sql import _bump_meta, _chunked, _qmarks, _upsert_meta
 from .rows import (  # noqa: F401 - ре-экспорт для совместимости (тесты, hippocampus)
     _COLS,
@@ -58,6 +63,53 @@ class StorageError(Exception):
 
 # батч журнала событий в iter_events (замок на порцию — как в iter_active)
 _EVENTS_BATCH = 256
+
+
+@dataclass(frozen=True)
+class StoreMeta:
+    """Метаданные базы без открытия MemoryStore и без загрузки эмбеддера."""
+
+    exists: bool
+    dim: int  # из длины блоба embedding; 256, если строк нет
+    embedder: str  # db_meta['embedder']; "" для несуществующей/битой базы
+    config: MemoryConfig | None  # db_meta['config']; None если нет или битый
+
+
+def read_meta(path: str | Path) -> StoreMeta:
+    """Лёгкое чтение db_meta для хуков, TUI, peer и командного recall.
+
+    Один read-only коннект: эмбеддер не загружается, схема не мигрирует,
+    битая база не поднимает исключение — читатель получает значения по
+    умолчанию, а честную ошибку всё равно отдаст MemoryStore при открытии."""
+    from ..config import MemoryConfig  # локально: у config нет зависимостей store
+
+    db = Path(path) / "memory.db"
+    if not db.exists():
+        return StoreMeta(exists=False, dim=256, embedder="", config=None)
+    con = sqlite3.connect(str(db))
+    try:
+        meta = dict(con.execute(
+            "SELECT key, value FROM db_meta WHERE key IN ('embedder','config')"
+        ).fetchall())
+        try:
+            emb_row = con.execute(
+                "SELECT length(embedding) FROM memories LIMIT 1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            emb_row = None
+    except sqlite3.DatabaseError:
+        return StoreMeta(exists=True, dim=256, embedder="", config=None)
+    finally:
+        con.close()
+    dim = (int(emb_row[0]) // 4) if emb_row and emb_row[0] else 256
+    config: MemoryConfig | None = None
+    if "config" in meta:
+        try:
+            config = MemoryConfig.from_snapshot(json.loads(meta["config"]))
+        except Exception:  # noqa: BLE001 - битый конфиг не должен ломать читателя
+            config = None
+    return StoreMeta(exists=True, dim=dim,
+                     embedder=str(meta.get("embedder", "")), config=config)
 
 
 class MemoryStore:

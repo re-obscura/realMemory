@@ -30,9 +30,10 @@ _PREVIEW_LIMIT = 400
 def _store_for(root):
     """Открыть базу без загрузки эмбеддера (геометрия из db_meta, как хуки)."""
     from ..config import MemoryConfig
-    from ..hook_cli import _infer_dim, _load_cfg
+    from ..store import read_meta
 
-    cfg = _load_cfg(root) or MemoryConfig(dim=_infer_dim(root))
+    meta = read_meta(root)
+    cfg = meta.config or MemoryConfig(dim=meta.dim)
     return MemoryStore(root / "memory.db", dim=cfg.dim)
 
 

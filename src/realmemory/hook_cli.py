@@ -21,49 +21,18 @@ import sys
 import time
 from pathlib import Path
 
-
-def _infer_dim(path: Path) -> int:
-    """Размерность эмбеддингов из существующей базы (без загрузки модели)."""
-    db = path / "memory.db"
-    if not db.exists():
-        return 256
-    con = sqlite3.connect(str(db))
-    try:
-        row = con.execute("SELECT length(embedding) FROM memories LIMIT 1").fetchone()
-    finally:
-        con.close()
-    return int(row[0]) // 4 if row else 256
-
-
-def _load_cfg(path: Path):
-    """Конфиг из базы (записывается при первом открытии); None если нет/битый."""
-    db = path / "memory.db"
-    if not db.exists():
-        return None
-    con = sqlite3.connect(str(db))
-    try:
-        row = con.execute("SELECT value FROM db_meta WHERE key='config'").fetchone()
-    except sqlite3.DatabaseError:
-        return None
-    finally:
-        con.close()
-    if not row:
-        return None
-    from .config import MemoryConfig
-
-    try:
-        return MemoryConfig.from_snapshot(json.loads(row[0]))
-    except Exception:  # noqa: BLE001 - битый конфиг не должен ломать хук
-        return None
+from ._streams import force_utf8_streams
 
 
 def _open(path: str, namespace: str | None = None):
     from . import Hippocampus, MemoryConfig
     from .encoding.embedder import HashingEmbedder
+    from .store import read_meta
     from .timeprov import SystemClock
 
     p = _resolve_hook_root(Path(path), namespace)
-    cfg = _load_cfg(p) or MemoryConfig(dim=_infer_dim(p))
+    meta = read_meta(p)
+    cfg = meta.config or MemoryConfig(dim=meta.dim)
     return Hippocampus.open(
         p, config=cfg, embedder=HashingEmbedder(dim=cfg.dim), clock=SystemClock(),
         verify_embedder=False,  # хук не порождает векторов; боевой эмбеддер базы не трогаем
@@ -258,22 +227,8 @@ def _report_hook_error(args, exc: BaseException) -> None:
         pass
 
 
-def _force_utf8_streams() -> None:
-    """Хуки говорят с клиентом по пайпам: на Windows кодировка пайпа — ANSI
-    (cp1252 и т.п.), и кириллица в брифе/ошибке падает UnicodeEncodeError.
-    Контракт вывода — UTF-8, так что выставляем его принудительно."""
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue  # не-TextIO обёртки (capture, редкие пайпы) — как есть
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
-
-
 def main(argv=None) -> None:
-    _force_utf8_streams()
+    force_utf8_streams()
     parser = argparse.ArgumentParser(prog="realmemory-hooks")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
