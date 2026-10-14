@@ -95,13 +95,31 @@ def capture() -> dict:
     for packets in results.values():
         for p in packets:
             p.pop("latency_ms")  # wall-clock, в эталон не входит
-    return results
+    return quantize(results)
+
+
+def quantize(obj):
+    """Округление float до 5 знаков: последний бит gemv гуляет между сборками
+    BLAS (урок v0.8.2, сравнение с abs=1e-5) — recall округляет до 6, этого
+    мало для кросс-платформенной стабильности, сравниваем с точностью 1e-5.
+    Кортежи (RecallPacket.items после asdict) разворачиваются в списки —
+    сравнение всё равно идёт через JSON."""
+    if isinstance(obj, float):
+        return round(obj, 5)
+    if isinstance(obj, tuple):
+        return [quantize(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: quantize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [quantize(v) for v in obj]
+    return obj
 
 
 def test_recall_packets_stable_against_fixture():
     assert FIXTURE.exists(), "эталон отсутствует: python tests/test_recall_snapshot.py"
     expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    # JSON round-trip: кортежи пакетов сравниваются с массивами эталона
+    # JSON round-trip: кортежи пакетов сравниваются с массивами эталона;
+    # обе стороны квантизированы в capture() — эталон платформонезависим
     actual = json.loads(json.dumps(capture()))
     assert actual == expected, (
         "пакеты recall изменились: если изменение сознательное — "
