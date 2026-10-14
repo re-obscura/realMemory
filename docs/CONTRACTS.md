@@ -1,8 +1,10 @@
-# realMemory Module Contracts v0.4
+# realMemory Module Contracts
 
-This document fixes public interfaces. Rule: any change to a public API
-signature requires editing this file in the same commit. Anything not described
-here is private and may change freely.
+Status: v0.9.0. This document fixes public interfaces. Rule: any change to a
+public API signature requires editing this file in the same commit. Anything
+not described here is private and may change freely. The team-sharing layer
+(registry, policy, transport, TUI) is contracted separately in
+[TEAM.md](TEAM.md).
 
 Conventions:
 - time — `float`, epoch seconds (UTC); all config timeouts are seconds;
@@ -50,6 +52,7 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
     source: str                  # "direct" | "associated" | "keyword"
     created_at: float; updated_at: float; meta: dict
     scope: str                   # trace scope
+    author: str                  # who wrote it; empty for pre-v0.5.2 traces
 
 @dataclass(frozen=True) RecallPacket:
     query: str; items: tuple[RecalledMemory, ...]
@@ -58,7 +61,9 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
 @dataclass(frozen=True) ConsolidationReport:
     edges_committed: int; edges_pruned: int
     promoted_to_semantic: int; rewards_applied: int
-    journal_pruned: int; forgotten_traces: int; elapsed_ms: float
+    journal_pruned: int; forgotten_traces: int
+    publications_retracted: int   # tombstones of forgotten traces' publications
+    elapsed_ms: float
 
 @dataclass MemoryRecord:  # internal storage unit
     id, text, kind, status, meta,
@@ -66,6 +71,7 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
     created_at, updated_at, reinforced_count, last_reinforced_at,
     base_strength, valid_from, valid_to, superseded_by,
     scope = SCOPE_GLOBAL
+    author = ""                  # empty for traces created before v0.5.2
 ```
 
 Invariants: `0 ≤ cosine, confidence, retention ≤ 1`; abstained means "no
@@ -253,13 +259,24 @@ class MemoryStore(path, dim):                        # context manager; WAL + bu
     def update_trace(id, base_strength, reinforced_count, last_reinforced_at, kind=None) -> None
     def adjust_base(id, base_strength, updated_at) -> None   # weakening without timer reset
     def mark_superseded(id, by_id, when) -> None
+    def forget_traces(memory_ids) -> int                     # physical delete of traces
+                                                             # forgotten below the recall floor;
+                                                             # clears elig_sources, keeps the journal;
+                                                             # FTS syncs via triggers; returns #deleted
     def iter_active(batch=256) -> Iterator[MemoryRecord]
+    def iter_active_light(batch=512) -> Iterator[tuple]      # (id, kind, created_at, last_reinforced_at,
+                                                             # base_strength, reinforced_count) — no blobs;
+                                                             # used by sleep passes (promotion/GC/metrics)
     def count(status=None, kind=None, scope=None) -> int
     def scope_counts() -> dict[str, int]                     # active traces per scope
+    def canonical_scope(name) -> str                         # existing scope with the same canonical key
+                                                             # (casefold + separator unification), most
+                                                             # populated variant wins; else name as-is
     def all_active_ids() -> np.ndarray[int64]
     def top_by_reinforcements(limit=10) -> list[MemoryRecord]   # for reports
     def stale_episodic(limit=10) -> list[MemoryRecord]          # forgetting candidates
     def max_updated_at() -> float | None                         # sleep throttling
+    def wal_checkpoint() -> None                             # passive WAL checkpoint (long-lived MCP process)
     def backup(dest_dir=None, keep=10) -> Path                   # consistent copy
                                                                  # (sqlite backup API) + rotation;
                                                                  # called on consolidate()
@@ -285,8 +302,24 @@ class MemoryStore(path, dim):                        # context manager; WAL + bu
     def event_append(event_type, fields, ts) -> None
     def event_count() -> int
     def iter_events() -> Iterator[dict]                      # {"ts","type",**data} ordered by seq
+    def events_prune(keep_rows) -> int                       # keep the last keep_rows events,
+                                                             # return #deleted; <=0 disables
     def gate_decisions() -> dict[str, int]                   # from write events via $.action
     def recall_stats() -> (count, avg_latency_ms)
+    def obs_counters() -> dict | None                        # incremental db_meta counters; None
+                                                             # until seeded (legacy databases)
+    def seed_obs_counters() -> dict                          # one-time scan-seed of those counters
+# publications registry (team layer; details in docs/TEAM.md)
+    def publication_add(trace_id, project, author, published_at, content_hash) -> str
+    def publication_retract(now, publication_ids=(), trace_ids=()) -> int
+                                                             # tombstone active publications by id or trace
+    def publications_active() -> list[tuple]                 # not retracted, chronological
+    def publications_tombstones() -> list[tuple]
+    def publications_unsynced() -> list[tuple]               # not yet confirmed by the network
+                                                             # (actives and tombstones both)
+    def publications_synced_active() -> list[tuple]          # delivered and still active
+    def publication_mark_synced(publication_ids, when) -> int    # only while synced_at IS NULL
+    def publication_mark_synced_force(publication_ids, when) -> int
 class StorageError(Exception)
 ```
 
@@ -307,14 +340,16 @@ class Hippocampus:
              embedder: EmbeddingProvider | None = None,
              clock: TimeProvider | None = None,
              namespace: str | None = None,
-             verify_embedder: bool = True) -> "Hippocampus"
+             verify_embedder: bool = True,
+             author: str = "") -> "Hippocampus"
         # opens or creates the database in directory path (path/namespace when namespace
         # given, [A-Za-z0-9][A-Za-z0-9_.-]{0,63}, else ValueError);
         # rebuilds derived structures (L1 buckets, unit index, edge CSR cache);
         # checks embedder identity and config geometry;
         # imports v0.3 legacy (journal.jsonl, snapshot.pkl) once;
         # verify_embedder=False — for tools without embeddings (hooks),
-        # the check is skipped and the marker is not overwritten
+        # the check is skipped and the marker is not overwritten;
+        # author — attribution stamped on every trace written via this instance
 
     def remember(self, text, *, kind=KIND_EPISODIC, meta=None, when=None,
                  force_new=False, related_ids: Sequence[int] = (),
@@ -352,8 +387,11 @@ class Hippocampus:
         # reward == 0 — neutral; also amplifies/weakens fresh eligibility events;
         # returns number of affected traces
 
-    def update_fact(self, old_id: int, new_text: str, meta=None) -> WriteResult
-        # force_new + mark_superseded(old→new); replacement inherits old scope
+    def update_fact(self, old_id: int, new_text: str, meta=None,
+                    kind: str | None = None) -> WriteResult
+        # force_new + mark_superseded(old→new); replacement inherits old scope;
+        # kind inherits from the old trace unless given explicitly — the only
+        # legal path from episodic to semantic (update_fact(kind=...))
 
     def consolidate() -> ConsolidationReport     # all state already in the DB, nothing to save;
                                                  # parallel sleeps serialize via transaction;
@@ -395,7 +433,9 @@ foreign-process writes become visible without reopen ·
 `recall(query, k, include_superseded, project)` ·
 `memorize(text, kind, related_ids, project)` ·
 `reflect(memory_ids, reward)` → `{touched}` · `revise(old_id, new_text)` ·
-`introspect()` (includes current project and scope breakdown) · `dream_log()` —
+`introspect()` (includes current project and scope breakdown) · `dream_log()` ·
+`recall_team(query, k, ...)` — only when a team policy exists (reads the
+coordinator cache; live→cached fallback) —
 thin wrappers over the facade with JSON serialization.
 Scope policy in tool descriptions: facts about the current workspace go with
 project=<name>; user-global preferences/identity omit project → global.
