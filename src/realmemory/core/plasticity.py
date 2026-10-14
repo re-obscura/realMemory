@@ -59,17 +59,6 @@ class EligibilityLog:
                              frozenset(int(i) for i in source_ids))
         )
 
-    def reward(self, source_ids, reward: float) -> int:
-        """Усилить/ослабить события, затрагивающие данные следы. Возвращает #событий."""
-        ids = {int(i) for i in source_ids}
-        factor = max(0.0, 1.0 + float(reward))
-        touched = 0
-        for e in self._events:
-            if e.source_ids & ids and factor != 1.0:
-                e.strength *= factor
-                touched += 1
-        return touched
-
     def commit(self, now: float):
         """Слить все события в агрегированные пары с затуханием; очистить лог.
 

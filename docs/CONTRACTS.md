@@ -145,8 +145,6 @@ vector; lexically close texts → high cosine similarity; disjoint vocabularies
 ## encoding.sdr
 
 ```python
-class BipolarProjector(dim, n_bits, seed):          # utility, unused by the core
-    def project(vec) -> np.ndarray[int8]            # sign(W·v̂)
 class SDREncoder(dim, n_units, k, seed):
     def encode(vec) -> np.ndarray[int32]            # top-k by W·v̂, sorted;
                                                     # zero input → empty array
@@ -172,7 +170,6 @@ class SDRVotingIndex(n_units, bucket_cap):
                                                     # returns #touched buckets
     def query(sdr, max_candidates) -> QueryResult   # votes = #shared units
     def load_factor() -> float                      # mean bucket length
-    def state_dict() / load_state_dict(state)
 ```
 
 Selectivity (test-checked): identical pattern → k votes; correlated with share ρ
@@ -188,18 +185,16 @@ absent eviction.
 
 class EligibilityLog(tau):
     def add(src_units, dst_units, strength, now, source_ids) -> None
-    def reward(source_ids: Iterable[int], reward: float, now) -> int  # strength *= max(0,(1+r)); returns #events
     def commit(now) -> (src, dst, weights)   # np arrays merged by key (sum),
                                              # each contribution decayed exp(-(now-created)/tau);
                                              # contributions < 1e-12 dropped; log cleared
     def pending_count -> int
     def state_dict() / load_state_dict(state)
+    # production reward path is MemoryStore.elig_reward — EligibilityLog is the
+    # consolidate staging buffer; its in-memory reward was removed as test-only
 
 def merge_pairs(src, dst, w) -> (src2, dst2, w2)     # duplicate-pair aggregation by sum
 ```
-
-Reward contract: positive reward only strengthens; negative may zero out a
-contribution (not below 0).
 
 ## core.assembly — AssemblyNetwork (L2)
 
@@ -286,7 +281,6 @@ class MemoryStore(path, dim):                        # context manager; WAL + bu
     def all_active_ids() -> np.ndarray[int64]
     def top_by_reinforcements(limit=10) -> list[MemoryRecord]   # for reports
     def stale_episodic(limit=10) -> list[MemoryRecord]          # forgetting candidates
-    def max_updated_at() -> float | None                         # sleep throttling
     def wal_checkpoint() -> None                             # passive WAL checkpoint (long-lived MCP process)
     def backup(dest_dir=None, keep=10) -> Path                   # consistent copy
                                                                  # (sqlite backup API) + rotation;

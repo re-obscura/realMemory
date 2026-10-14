@@ -15,6 +15,8 @@ import numpy as np
 
 
 class AssemblyNetwork:
+    """Семантика — эталонная (reference semantics); прод-путь записи идёт через MemoryStore.elig_add/edges_apply."""
+
     def __init__(
         self,
         n_units: int,

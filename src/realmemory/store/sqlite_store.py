@@ -73,6 +73,45 @@ def _is_duplicate_column(exc: sqlite3.OperationalError) -> bool:
     return "duplicate column name" in str(exc).lower()
 
 
+def _upsert_meta(con: sqlite3.Connection, key: str, value: str) -> None:
+    """Вставить/заменить ключ db_meta внутри текущей транзакции."""
+    con.execute(
+        "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+
+
+def _bump_meta(con: sqlite3.Connection, key: str, delta: float = 1,
+               *, is_float: bool = False) -> None:
+    """Атомарно прибавить delta к счётчику db_meta внутри текущей транзакции."""
+    if is_float:
+        con.execute(
+            "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value=CAST(CAST(value AS REAL)+? AS TEXT)",
+            (key, repr(float(delta)), float(delta)),
+        )
+    else:
+        con.execute(
+            "INSERT INTO db_meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
+            (key, str(int(delta)), int(delta)),
+        )
+
+
+def _chunked(ids: Sequence[int | str]) -> Iterator[list[int | str]]:
+    """Порции по _SQL_CHUNK: SQLite ограничивает число параметров запроса,
+    длинные IN-списки режутся на части."""
+    for start in range(0, len(ids), _SQL_CHUNK):
+        yield list(ids[start:start + _SQL_CHUNK])
+
+
+def _qmarks(n: int) -> str:
+    return ",".join("?" * n)
+
+
 def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
                     backup_factory) -> str:
     """Довести схему до SCHEMA_VERSION по цепочке миграций.
@@ -91,11 +130,7 @@ def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
         with lock:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.execute(
-                    "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (str(target),),
-                )
+                _upsert_meta(conn, "schema_version", str(target))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -128,11 +163,7 @@ def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
                         conn.execute(idx)
                     # версия фиксируется той же транзакцией: mark() здесь нельзя —
                     # его внутренний lock нерекурсивен
-                    conn.execute(
-                        "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
-                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        (str(SCHEMA_VERSION),),
-                    )
+                    _upsert_meta(conn, "schema_version", str(SCHEMA_VERSION))
                     conn.execute("COMMIT")
                 except BaseException:
                     conn.execute("ROLLBACK")
@@ -157,11 +188,7 @@ def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
                                 and stmt.lstrip().upper().startswith("ALTER")):
                             raise
                 # версия фиксируется той же транзакцией, что и DDL: атомарно
-                conn.execute(
-                    "INSERT INTO db_meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (str(target),),
-                )
+                _upsert_meta(conn, "schema_version", str(target))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -262,6 +289,9 @@ _COLS_LIGHT = "id,kind,created_at,last_reinforced_at,base_strength,reinforced_co
 
 # SQLite ограничивает число параметров запроса: длинные IN-списки режем
 _SQL_CHUNK = 500
+
+# батч журнала событий в iter_events (замок на порцию — как в iter_active)
+_EVENTS_BATCH = 256
 
 
 class StorageError(Exception):
@@ -502,22 +532,19 @@ class MemoryStore:
         if not ids:
             return 0
         with self._txn() as con:
-            for start in range(0, len(ids), _SQL_CHUNK):
-                part = ids[start:start + _SQL_CHUNK]
-                placeholders = ",".join("?" * len(part))
+            for part in _chunked(ids):
                 con.execute(
-                    f"DELETE FROM elig_sources WHERE mem_id IN ({placeholders})", part
+                    f"DELETE FROM elig_sources WHERE mem_id IN ({_qmarks(len(part))})",
+                    part,
                 )
             self.bump_memories_rev(con)
             remaining = 0
-            for start in range(0, len(ids), _SQL_CHUNK):
-                part = ids[start:start + _SQL_CHUNK]
+            for part in _chunked(ids):
                 con.executemany(
                     "DELETE FROM memories WHERE id=?", ((i,) for i in part)
                 )
-                placeholders = ",".join("?" * len(part))
                 remaining += int(con.execute(
-                    f"SELECT COUNT(*) FROM memories WHERE id IN ({placeholders})",
+                    f"SELECT COUNT(*) FROM memories WHERE id IN ({_qmarks(len(part))})",
                     part,
                 ).fetchone()[0])
         return len(ids) - remaining
@@ -576,11 +603,6 @@ class MemoryStore:
             self.bump_memories_rev(con)
         return True
 
-    def max_updated_at(self) -> float | None:
-        with self._lock:
-            row = self._conn.execute("SELECT MAX(updated_at) FROM memories").fetchone()
-        return None if row is None or row[0] is None else float(row[0])
-
     def backup(self, dest_dir: str | Path | None = None, keep: int = 10,
                min_interval_s: float = 0.0) -> Path | None:
         """Консистентная копия базы через sqlite backup API + ротация.
@@ -626,21 +648,12 @@ class MemoryStore:
 
     def set_meta(self, key: str, value: str) -> None:
         with self._txn() as con:
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, str(value)),
-            )
+            _upsert_meta(con, key, str(value))
 
     def bump_meta_int(self, key: str, delta: int = 1) -> int:
         """Атомарный инкремент целочисленного счётчика в db_meta; возвращает новое значение."""
         with self._txn() as con:
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE "
-                "SET value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
-                (key, str(delta), int(delta)),
-            )
+            _bump_meta(con, key, delta)
             (val,) = con.execute("SELECT value FROM db_meta WHERE key=?", (key,)).fetchone()
         return int(val)
 
@@ -668,11 +681,10 @@ class MemoryStore:
             return []
         by_id: dict[int, MemoryRecord] = {}
         with self._lock:
-            for start in range(0, len(ids), _SQL_CHUNK):
-                part = ids[start:start + _SQL_CHUNK]
-                placeholders = ",".join("?" * len(part))
+            for part in _chunked(ids):
                 rows = self._conn.execute(
-                    f"SELECT {_COLS} FROM memories WHERE id IN ({placeholders})", part
+                    f"SELECT {_COLS} FROM memories WHERE id IN ({_qmarks(len(part))})",
+                    part,
                 ).fetchall()
                 for r in rows:
                     by_id[int(r[0])] = _row_to_record(r, self.dim)
@@ -807,10 +819,10 @@ class MemoryStore:
 
     @property
     def fts_enabled(self) -> bool:
-        return getattr(self, "_fts_enabled", False)
+        return self._fts_enabled
 
     def fts_error(self) -> str | None:
-        return getattr(self, "_fts_error", None)
+        return self._fts_error
 
     def fts_match(self, expr: str, limit: int = 32) -> list[tuple[int, float]]:
         """ID следа + bm25-ранг (меньше = лучше) по выражению MATCH."""
@@ -851,32 +863,37 @@ class MemoryStore:
             ).fetchall()
         return [tuple(r) for r in rows]
 
-    def publication_mark_synced_force(self, publication_ids, when: float) -> int:
+    def publication_mark_synced_force(self, publication_ids: Sequence[str],
+                                      when: float) -> int:
         """Проставить synced_at БЕЗ условия «был NULL» (повторная отметка
         после форс-отзыва)."""
         ids = [str(i) for i in publication_ids]
         if not ids:
             return 0
-        ph = ",".join("?" * len(ids))
+        touched = 0
         with self._txn() as con:
-            cur = con.execute(
-                f"UPDATE publications SET synced_at=? WHERE id IN ({ph})",
-                (float(when), *ids),
-            )
-            return int(cur.rowcount)
+            for part in _chunked(ids):
+                cur = con.execute(
+                    f"UPDATE publications SET synced_at=? WHERE id IN ({_qmarks(len(part))})",
+                    (float(when), *part),
+                )
+                touched += int(cur.rowcount)
+        return touched
 
-    def publication_mark_synced(self, publication_ids, when: float) -> int:
+    def publication_mark_synced(self, publication_ids: Sequence[str],
+                                when: float) -> int:
         ids = [str(i) for i in publication_ids]
         if not ids:
             return 0
-        ph = ",".join("?" * len(ids))
+        touched = 0
         with self._txn() as con:
-            cur = con.execute(
-                f"UPDATE publications SET synced_at=? "
-                f"WHERE id IN ({ph}) AND synced_at IS NULL",
-                (float(when), *ids),
-            )
-            touched = int(cur.rowcount)
+            for part in _chunked(ids):
+                cur = con.execute(
+                    f"UPDATE publications SET synced_at=? "
+                    f"WHERE id IN ({_qmarks(len(part))}) AND synced_at IS NULL",
+                    (float(when), *part),
+                )
+                touched += int(cur.rowcount)
         return touched
 
     def memories_rev(self) -> int:
@@ -887,13 +904,9 @@ class MemoryStore:
         return int(val) if val is not None else -1
 
     @staticmethod
-    def bump_memories_rev(con) -> None:
+    def bump_memories_rev(con: sqlite3.Connection) -> None:
         """Поднять счётчик ВНУТРИ текущей транзакции мутации следов."""
-        con.execute(
-            "INSERT INTO db_meta(key, value) VALUES('memories_rev','1') "
-            "ON CONFLICT(key) DO UPDATE SET "
-            "value=CAST(CAST(value AS INTEGER)+1 AS TEXT)"
-        )
+        _bump_meta(con, "memories_rev")
 
     def edges_rev(self) -> int:
         """Версия рёбер: растёт при любой их мутации (инвалидация CSR-кэша фасада)."""
@@ -952,15 +965,8 @@ class MemoryStore:
                     "ON CONFLICT(key) DO UPDATE SET w = w + excluded.w",
                     pairs,
                 )
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES('last_edge_tick', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (repr(float(now)),),
-            )
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES('edges_rev', '1') "
-                "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)"
-            )
+            _upsert_meta(con, "last_edge_tick", repr(float(now)))
+            _bump_meta(con, "edges_rev")
         return len(pairs), pruned
 
     def edges_import(self, keys: np.ndarray, ws: np.ndarray, last_tick: float | None) -> None:
@@ -975,15 +981,8 @@ class MemoryStore:
             if pairs:
                 con.executemany("INSERT OR REPLACE INTO edges(key, w) VALUES(?, ?)", pairs)
             if last_tick is not None:
-                con.execute(
-                    "INSERT INTO db_meta(key, value) VALUES('last_edge_tick', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (repr(float(last_tick)),),
-                )
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES('edges_rev', '1') "
-                "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)"
-            )
+                _upsert_meta(con, "last_edge_tick", repr(float(last_tick)))
+            _bump_meta(con, "edges_rev")
 
     def edges_stats(self, now: float, tau: float) -> tuple[int, float]:
         """(число рёбер, суммарный эффективный вес с учётом ленивого распада)."""
@@ -1050,11 +1049,10 @@ class MemoryStore:
             if rows:
                 seqs = [r[0] for r in rows]
                 by_seq: dict[int, list[int]] = {}
-                for start in range(0, len(seqs), _SQL_CHUNK):
-                    part = seqs[start:start + _SQL_CHUNK]
-                    ph = ",".join("?" * len(part))
+                for part in _chunked(seqs):
                     src_rows = con.execute(
-                        f"SELECT seq, mem_id FROM elig_sources WHERE seq IN ({ph})", part
+                        f"SELECT seq, mem_id FROM elig_sources WHERE seq IN ({_qmarks(len(part))})",
+                        part,
                     ).fetchall()
                     for seq, mid in src_rows:
                         by_seq.setdefault(int(seq), []).append(int(mid))
@@ -1076,35 +1074,19 @@ class MemoryStore:
     # существовать с первого bump; legacy-базы засеивает seed_obs_counters().
     _OBS_ACTIONS = ("create", "reinforce", "link")
 
-    @staticmethod
-    def _bump_counter(con, key: str, delta: float = 1, *, is_float: bool = False) -> None:
-        if is_float:
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET "
-                "value=CAST(CAST(value AS REAL)+? AS TEXT)",
-                (key, repr(float(delta)), float(delta)),
-            )
-        else:
-            con.execute(
-                "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET "
-                "value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
-                (key, str(int(delta)), int(delta)),
-            )
-
-    def _bump_obs_counters(self, con, event_type: str, data: dict) -> None:
+    def _bump_obs_counters(self, con: sqlite3.Connection, event_type: str,
+                           data: dict) -> None:
         if event_type == "write":
-            self._bump_counter(con, "obs_writes_total")
+            _bump_meta(con, "obs_writes_total")
             action = str(data.get("action", "unknown"))
             if action in self._OBS_ACTIONS:
-                self._bump_counter(con, f"obs_action_{action}_total")
+                _bump_meta(con, f"obs_action_{action}_total")
         elif event_type == "recall":
-            self._bump_counter(con, "obs_recalls_total")
+            _bump_meta(con, "obs_recalls_total")
             latency = data.get("latency_ms")
             if latency is not None:
-                self._bump_counter(con, "obs_recall_ms_sum",
-                                   float(latency), is_float=True)
+                _bump_meta(con, "obs_recall_ms_sum",
+                        float(latency), is_float=True)
 
     def event_append(self, event_type: str, fields: dict | None = None, ts: float = 0.0) -> None:
         data = dict(fields or {})
@@ -1146,13 +1128,10 @@ class MemoryStore:
         ] + [(f"obs_action_{a}_total", actions.get(a, 0)) for a in self._OBS_ACTIONS]
         with self._txn() as con:
             for key, val in rows:
-                con.execute(
-                    "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (key, str(val)),
-                )
+                _upsert_meta(con, key, str(val))
         result = self.obs_counters()
-        assert result is not None  # посев выше обязан завести все ключи
+        if result is None:  # посев выше обязан завести все ключи
+            raise StorageError("seed_obs_counters не засеял счётчики наблюдаемости")
         return result
 
     def event_count(self) -> int:
@@ -1168,7 +1147,8 @@ class MemoryStore:
         while True:
             with self._lock:
                 rows = self._conn.execute(
-                    "SELECT seq, ts, type, data FROM events WHERE seq>? ORDER BY seq LIMIT 256",
+                    "SELECT seq, ts, type, data FROM events "
+                    f"WHERE seq>? ORDER BY seq LIMIT {_EVENTS_BATCH}",
                     (last_seq,),
                 ).fetchall()
             if not rows:
@@ -1213,7 +1193,7 @@ class MemoryStore:
 
     @property
     def schema_version(self) -> str:
-        return str(getattr(self, "_schema_version", SCHEMA_VERSION))
+        return str(self._schema_version)
 
     # -- командный слой: registry публикаций ----------------------------------------
 
@@ -1240,19 +1220,16 @@ class MemoryStore:
         tr_ids = [int(i) for i in trace_ids]
         touched = 0
         with self._txn() as con:
-            for group, col, params in (
-                ("id", "id", pub_ids),
-                ("trace_id", "trace_id", tr_ids),
-            ):
+            for col, params in (("id", pub_ids), ("trace_id", tr_ids)):
                 if not params:
                     continue
-                ph = ",".join("?" * len(params))
-                cur = con.execute(
-                    f"UPDATE publications SET revoked_at=?, synced_at=NULL "
-                    f"WHERE revoked_at IS NULL AND {col} IN ({ph})",
-                    (float(now), *params),
-                )
-                touched += int(cur.rowcount)
+                for part in _chunked(params):
+                    cur = con.execute(
+                        f"UPDATE publications SET revoked_at=?, synced_at=NULL "
+                        f"WHERE revoked_at IS NULL AND {col} IN ({_qmarks(len(part))})",
+                        (float(now), *part),
+                    )
+                    touched += int(cur.rowcount)
         return touched
 
     def publications_active(self) -> list[tuple]:

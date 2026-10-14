@@ -19,7 +19,7 @@ import dataclasses
 import json
 import pickle
 import re
-import time as _time
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Self
@@ -204,7 +204,7 @@ class Hippocampus:
             return
         try:
             other = json.loads(stored)
-        except ValueError:
+        except json.JSONDecodeError:
             other = {}
         for key in ("dim", "n_units", "sdr_seed"):
             if key in other and other[key] != getattr(self.config, key):
@@ -224,7 +224,7 @@ class Hippocampus:
                     continue
                 try:
                     event = json.loads(line)
-                except ValueError:
+                except json.JSONDecodeError:
                     continue
                 etype = str(event.pop("type", "unknown"))
                 ts = float(event.pop("ts", event.pop("t", 0.0)))
@@ -263,14 +263,24 @@ class Hippocampus:
             self.store.event_append("legacy_snapshot_imported", status,
                                     ts=float(self.clock.now()))
 
-    def _rebuild_volatile(self) -> None:
-        """Производные структуры при открытии: L1-бакеты, юнит-индекс, кэш
-        эмбеддингов, CSR рёбер."""
+    def _reindex_all(self) -> None:
+        """Полная пересборка волатильных структур из БД: L1-бакеты, юнит-индекс,
+        кэш эмбеддингов. O(N) — только при открытии и реальных чужих мутациях."""
+        self.index = SDRVotingIndex(self.config.n_units,
+                                    bucket_cap=self.config.bucket_cap)
+        self._unit_index = {}
+        self._emb_len = 0
+        self._emb_pos.clear()
         for rec in self.store.iter_active():
             self.index.write(rec.sdr, rec.id)
             for u in rec.sdr.tolist():
                 self._unit_index.setdefault(int(u), set()).add(rec.id)
             self._cache_append(rec.id, rec.embedding)
+        self._trace_count = self.store.count(status=STATUS_ACTIVE)
+
+    def _rebuild_volatile(self) -> None:
+        """Производные структуры при открытии: индексы следов + CSR рёбер."""
+        self._reindex_all()
         self._reload_network_cache()
 
     # -- кэш эмбеддингов (точный скан) ------------------------------------------
@@ -301,11 +311,17 @@ class Hippocampus:
             and self._trace_count <= self.config.exact_scan_max_traces
         )
 
+    @staticmethod
+    def _unit(emb: np.ndarray) -> np.ndarray:
+        """Единичная версия вектора (float32); нулевой возвращается как есть —
+        деление на нулевую норму запрещено, а нули и так дают нулевые косинусы."""
+        n = float(np.linalg.norm(emb))
+        return (emb / np.float32(n)).astype(np.float32) if n > 0.0 else np.zeros_like(emb)
+
     def _cosine_ranked(self, emb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(id, косинус) всех закэшированных следов по убыванию похожести.
         Нулевой запрос даёт нули — без распада на деление."""
-        qn = float(np.linalg.norm(emb))
-        qv = (emb / np.float32(qn)).astype(np.float32) if qn > 0.0 else emb.astype(np.float32)
+        qv = self._unit(emb)
         view = self._emb_buf[: self._emb_len]
         sims = view @ qv if self._emb_len else np.empty(0, dtype=np.float32)
         order = np.argsort(-sims, kind="stable")
@@ -329,17 +345,7 @@ class Hippocampus:
         rev = self.store.memories_rev()
         if rev == self._mem_rev_seen:
             return
-        self.index = SDRVotingIndex(self.config.n_units,
-                                    bucket_cap=self.config.bucket_cap)
-        self._unit_index = {}
-        self._emb_len = 0
-        self._emb_pos.clear()
-        for rec in self.store.iter_active():
-            self.index.write(rec.sdr, rec.id)
-            for u in rec.sdr.tolist():
-                self._unit_index.setdefault(int(u), set()).add(rec.id)
-            self._cache_append(rec.id, rec.embedding)
-        self._trace_count = self.store.count(status=STATUS_ACTIVE)
+        self._reindex_all()
         self._mem_rev_seen = rev
 
     def _refresh_rev_marker(self) -> None:
@@ -426,8 +432,7 @@ class Hippocampus:
                         probed.add(rid)
                 recs = self.store.get_many(probe_ids)
                 if recs:
-                    qn = float(np.linalg.norm(emb))
-                    qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+                    qv = self._unit(emb)
                     sims = np.stack([r.embedding for r in recs]) @ qv
                     # убывающий порядок по косинусу: первый прошедший фильтры —
                     # лучший, семантика префиксного прохода сохраняется
@@ -463,8 +468,7 @@ class Hippocampus:
         scored: list[tuple[int, float]] = []
         recs = self.store.get_many(candidate_ids)
         if recs:
-            qn = float(np.linalg.norm(emb))
-            qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+            qv = self._unit(emb)
             sims = np.stack([r.embedding for r in recs]) @ qv
             for rec, sim in zip(recs, sims.tolist()):
                 if rec.status != STATUS_ACTIVE:
@@ -525,7 +529,8 @@ class Hippocampus:
         keep = ii != jj
         return ii[keep].astype(np.int32), jj[keep].astype(np.int32)
 
-    def _bind_sdrs(self, units_a, units_b, strength: float, now: float, source_ids) -> int:
+    def _bind_sdrs(self, units_a: np.ndarray, units_b: np.ndarray,
+                   strength: float, now: float, source_ids: Sequence[int]) -> int:
         ua = np.unique(np.asarray(units_a, dtype=np.int64))
         ub = np.unique(np.asarray(units_b, dtype=np.int64))
         if ua.size == 0 or ub.size == 0 or strength <= 0:
@@ -700,6 +705,20 @@ class Hippocampus:
                             publications_retracted=retracted_pubs)
         return res
 
+    def _abstain_packet(self, query: str, k: int, now: float, t0: float,
+                        engine: str, reason: dict[str, Any]) -> RecallPacket:
+        """Пустой пакет с abstained=true + событие журнала. **reason раскрывается
+        перед engine/t — порядок ключей события сохраняется прежним."""
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        packet = RecallPacket(query=query, items=(), abstained=True,
+                              latency_ms=latency_ms)
+        self.journal.append(
+            "recall",
+            k=k, items=0, abstained=True, latency_ms=round(latency_ms, 3),
+            top_conf=None, **reason, engine=engine, t=now,
+        )
+        return packet
+
     # -- чтение ---------------------------------------------------------------------
 
     def recall(
@@ -713,7 +732,7 @@ class Hippocampus:
     ) -> RecallPacket:
         """Поиск по памяти. scope='<проект>' видит следы проекта и global;
         scope=None или all_scopes=True — вся память без фильтра."""
-        t0 = _time.perf_counter()
+        t0 = time.perf_counter()
         self._resync_traces_if_changed()
         if scope is not None:
             scope = self.store.canonical_scope(scope)
@@ -742,11 +761,8 @@ class Hippocampus:
 
         def conf_direct(cos: float, votes_norm: float, ret: float) -> float:
             return cos * (w_votes_eff + (1 - w_votes_eff) * min(1.0, votes_norm)) * (
-                0.3 + 0.7 * ret
+                _ret_factor(ret)
             )
-
-        def ret_factor(ret: float) -> float:
-            return 0.3 + 0.7 * ret
 
         def evaluate(rec: MemoryRecord, cos: float) -> None:
             """Ветвление скоринга одного кандидата (общее для обоих проходов).
@@ -775,18 +791,18 @@ class Hippocampus:
                 vnorm = votes_map.get(rec.id, 0) / max(1, qr_active)
                 c = conf_direct(cos, vnorm, ret)
                 if full_match:
-                    c = max(c, self.config.w_keyword * ret_factor(ret))
+                    c = max(c, self.config.w_keyword * _ret_factor(ret))
                     has_full_match = True
                 source = SOURCE_DIRECT
             elif full_match:
-                c = self.config.w_keyword * ret_factor(ret)
+                c = self.config.w_keyword * _ret_factor(ret)
                 source = SOURCE_KEYWORD
                 has_full_match = True
             elif rec.id in kw_ids and query_tokens and doc_tokens is not None:
                 overlap = len(doc_tokens & query_tokens) / len(query_tokens)
                 if overlap <= 0.0:
                     return
-                c = self.config.w_keyword * overlap * ret_factor(ret)
+                c = self.config.w_keyword * overlap * _ret_factor(ret)
                 source = SOURCE_KEYWORD
             else:
                 return
@@ -807,8 +823,7 @@ class Hippocampus:
             )
             recs = self.store.get_many(candidates)
             if recs:
-                qn = float(np.linalg.norm(emb))
-                qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+                qv = self._unit(emb)
                 sims = np.stack([r.embedding for r in recs]) @ qv
                 for rec, sim in zip(recs, sims.tolist()):
                     evaluate(rec, sim)
@@ -838,8 +853,7 @@ class Hippocampus:
             # обязан сохранить шансы независимо от глубины в рейтинге
             kw_extras = sorted(rid for rid in kw_ids if rid not in seen)
             if kw_extras:
-                qn = float(np.linalg.norm(emb))
-                qv = (emb / np.float32(qn)).astype(np.float32) if qn else np.zeros_like(emb)
+                qv = self._unit(emb)
                 for rec in self.store.get_many(kw_extras):
                     cos = float(np.dot(rec.embedding, qv)) if rec.embedding.size else 0.0
                     evaluate(rec, cos)
@@ -862,16 +876,10 @@ class Hippocampus:
             stride = max(1, ranked_cos.size // 512)
             null_median = float(np.median(ranked_cos[::stride]))
             if items[0][1] < null_median + self.config.exact_abstain_rel_margin:
-                latency_ms = (_time.perf_counter() - t0) * 1000.0
-                packet = RecallPacket(query=query, items=(), abstained=True,
-                                      latency_ms=latency_ms)
-                self.journal.append(
-                    "recall",
-                    k=k, items=0, abstained=True, latency_ms=round(latency_ms, 3),
-                    top_conf=None, below_null=True,
-                    null_median=round(null_median, 4), engine=engine, t=now,
+                return self._abstain_packet(
+                    query, k, now, t0, engine,
+                    {"below_null": True, "null_median": round(null_median, 4)},
                 )
-                return packet
 
         # воздержание «нет выраженного лидера»: top1 ниже сильного порога и вся
         # прямая волна лежит в узком коридоре — это шум анизотропии, а не ответ;
@@ -886,15 +894,7 @@ class Hippocampus:
             and items[0][1] < self.config.cos_min_strong_recall
             and (items[0][1] - min(it[1] for it in items)) < self.config.abstain_spread_cos
         ):
-            latency_ms = (_time.perf_counter() - t0) * 1000.0
-            packet = RecallPacket(query=query, items=(), abstained=True,
-                                  latency_ms=latency_ms)
-            self.journal.append(
-                "recall",
-                k=k, items=0, abstained=True, latency_ms=round(latency_ms, 3),
-                top_conf=None, flat_noise=True, engine=engine, t=now,
-            )
-            return packet
+            return self._abstain_packet(query, k, now, t0, engine, {"flat_noise": True})
 
         # волна ассоциаций: spread от SDR топ-следов по пластичным рёбрам;
         # сигнал связи — достижимые юниты, поэтому косинусный фильтр не применяется
@@ -924,7 +924,7 @@ class Hippocampus:
                 ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind, self.config)
                 if ret < self.config.min_retention_recall:
                     continue
-                c = self.config.assoc_confidence_penalty * _assoc_cos_floor(cos) * (0.3 + 0.7 * ret)
+                c = self.config.assoc_confidence_penalty * _assoc_cos_floor(cos) * _ret_factor(ret)
                 extras.append((c, cos, ret, rec, SOURCE_ASSOCIATED))
                 seen.add(rec.id)
             extras.sort(key=lambda t: (-t[0], t[3].id))
@@ -947,7 +947,7 @@ class Hippocampus:
             )
             for c, cos, ret, rec, source in items
         )
-        latency_ms = (_time.perf_counter() - t0) * 1000.0
+        latency_ms = (time.perf_counter() - t0) * 1000.0
         packet = RecallPacket(query=query, items=out, abstained=len(out) == 0,
                               latency_ms=latency_ms)
         # наблюдаемость: каждое обращение — для последующего анализа трендов
@@ -1009,7 +1009,7 @@ class Hippocampus:
         забытые ниже recall-пола (после grace-периода), записать метрики.
         Всё состояние уже в БД, отдельного сохранения не требуется; параллельные
         консолидации других процессов сериализуются транзакцией."""
-        t0 = _time.perf_counter()
+        t0 = time.perf_counter()
         now = float(self.clock.now())
         # страховочная копия до любых изменений; троттлинг по wall-clock — сны
         # после каждого ответа агента не обязаны копировать всю базу. Сбой
@@ -1107,7 +1107,7 @@ class Hippocampus:
             journal_pruned=journal_pruned,
             forgotten_traces=len(forgotten_ids),
             publications_retracted=retracted_pubs,
-            elapsed_ms=(_time.perf_counter() - t0) * 1000.0,
+            elapsed_ms=(time.perf_counter() - t0) * 1000.0,
         )
         self.store.set_meta("last_consolidate_at", repr(now))
         self.journal.append("consolidate", **dataclasses.asdict(report))
@@ -1208,3 +1208,8 @@ def _assoc_cos_floor(cos: float) -> float:
     """Для associated-элементов косинус может быть ~0: связь даётся юнитами.
     Пол гарантирует ненулевой вклад уверенности от самой связи."""
     return max(cos, 0.05)
+
+
+def _ret_factor(ret: float) -> float:
+    """Множитель уверенности от удержания: 0.3 + 0.7·ret (фикс контракта recall)."""
+    return 0.3 + 0.7 * ret

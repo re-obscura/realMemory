@@ -1,8 +1,14 @@
-"""Контракты пластичности: агрегация пар, затухание eligibility, reward."""
+"""Контракты пластичности: агрегация пар, затухание eligibility, reward.
+
+reward-контракт проверяется через прод-путь store.elig_reward: нагретые
+события попадают в стейджинг как в консолидации (elig_drain ->
+EligibilityLog.load_state_dict); store-уровень детально — test_store_journal.py.
+"""
 import numpy as np
 import pytest
 
 from realmemory.core.plasticity import EligibilityLog, merge_pairs
+from realmemory.store.sqlite_store import MemoryStore
 
 
 def test_merge_pairs_aggregates_duplicates():
@@ -26,21 +32,27 @@ def test_commit_applies_decay_and_clears():
     assert src[0] == 1 and dst[0] == 2
 
 
-def test_reward_amplifies_pending_only():
-    log = EligibilityLog(tau=100.0)
-    log.add(np.array([1]), np.array([2]), 1.0, 0.0, [7])
-    assert log.reward([7], 1.0) == 1
-    _, _, w = log.commit(now=0.0)
+def test_reward_amplifies_pending_only(tmp_path):
+    store = MemoryStore(tmp_path / "m.db", dim=8)
+    store.elig_add(np.array([1], np.int32), np.array([2], np.int32), 1.0, 0.0, [7])
+    assert store.elig_reward([7], factor=2.0) == 1
+    staging = EligibilityLog(tau=100.0)
+    staging.load_state_dict({"tau": 100.0, "events": store.elig_drain()})
+    _, _, w = staging.commit(now=0.0)
     assert w[0] == pytest.approx(2.0)
+    store.close()
 
 
-def test_negative_reward_zeroes_contribution():
-    log = EligibilityLog(tau=100.0)
-    log.add(np.array([1]), np.array([2]), 1.0, 0.0, [7])
-    log.reward([7], -1.0)
-    src, dst, w = log.commit(now=0.0)
-    # обнулённое событие не даёт ребра вовсе
+def test_negative_reward_zeroes_contribution(tmp_path):
+    # фактор 0.0 — эквивалент reward=-1.0; обнулённое событие не даёт ребра вовсе
+    store = MemoryStore(tmp_path / "m.db", dim=8)
+    store.elig_add(np.array([1], np.int32), np.array([2], np.int32), 1.0, 0.0, [7])
+    assert store.elig_reward([7], factor=0.0) == 1
+    staging = EligibilityLog(tau=100.0)
+    staging.load_state_dict({"tau": 100.0, "events": store.elig_drain()})
+    src, dst, w = staging.commit(now=0.0)
     assert src.size == dst.size == w.size == 0
+    store.close()
 
 
 def test_fully_decayed_commit_is_empty():
@@ -50,13 +62,16 @@ def test_fully_decayed_commit_is_empty():
     assert src.size == dst.size == w.size == 0
 
 
-def test_reward_scopes_to_source_ids():
-    log = EligibilityLog(tau=100.0)
-    log.add(np.array([1]), np.array([2]), 1.0, 0.0, [7])
-    log.add(np.array([3]), np.array([4]), 1.0, 0.0, [8])
-    assert log.reward([7], 1.0) == 1
-    _, _, w = log.commit(now=0.0)
+def test_reward_scopes_to_source_ids(tmp_path):
+    store = MemoryStore(tmp_path / "m.db", dim=8)
+    store.elig_add(np.array([1], np.int32), np.array([2], np.int32), 1.0, 0.0, [7])
+    store.elig_add(np.array([3], np.int32), np.array([4], np.int32), 1.0, 0.0, [8])
+    assert store.elig_reward([7], factor=2.0) == 1
+    staging = EligibilityLog(tau=100.0)
+    staging.load_state_dict({"tau": 100.0, "events": store.elig_drain()})
+    _, _, w = staging.commit(now=0.0)
     assert sorted(w.tolist()) == [1.0, 2.0]
+    store.close()
 
 
 def test_state_roundtrip():

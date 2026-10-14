@@ -1,12 +1,14 @@
-"""Кодирование векторов: плотные биполярные адреса (L1) и разреженные SDR (L2).
+"""Кодирование векторов в разреженные SDR: k on-битов (top-k случайной проекции).
 
-Почему адресация L1 сделана на плотных биполярных векторах, а не на SDR:
-расстояние Хэмминга двух независимых биполярных векторов распределено
-Binomial(n_bits, 1/2) с mu=n_bits/2 и сигмой sqrt(n_bits)/2, а близкие входы
-(косинус rho) дают d ~= n_bits*(1-rho)/2 — режимы «случайно/похоже/идентично»
-разделены десятками сигм. У разреженных множеств перекрытие концентрируется
-около k^2/N, и фиксированная случайная «локация» не может быть близкой к
-широкому классу паттернов — селективности нет (см. docs/ARCHITECTURE.md §3).
+SDREncoder детерминированно отображает вектор в k отсортированных on-битов;
+перекрытие SDR монотонно связано с косинусной близостью входов. Рядом —
+метрики пересечения (overlap, overlap_fraction, jaccard) и calibrate_sparse:
+статистика перекрытий случайных SDR как базовая линия для порогов новизны.
+
+Биполярный вариант адресации L1 (BipolarProjector, плотные ±1-адреса с
+радиусом Хэмминга) был забенчмаркан и отклонён — отрицательный результат и
+причины см. в docs/ARCHITECTURE.md §3; L1 работает на инвертированном индексе
+SDR-юнитов (core/addressing.py).
 """
 from __future__ import annotations
 
@@ -14,31 +16,6 @@ from dataclasses import dataclass
 from itertools import combinations
 
 import numpy as np
-
-
-class BipolarProjector:
-    """Вектор -> биполярный адрес ±1 длины n_bits: sign(W·v̂).
-
-    Нулевой вход проецируется во все +1 (конвенция sign(0)=+1) — такие адреса
-    считаются вырожденными и отбраковываются вызывающей стороной.
-    """
-
-    def __init__(self, dim: int, n_bits: int, seed: int = 13) -> None:
-        if dim <= 0 or n_bits <= 0:
-            raise ValueError("dim и n_bits должны быть положительными")
-        rng = np.random.default_rng(seed)
-        self.dim = int(dim)
-        self.n_bits = int(n_bits)
-        self._w = rng.standard_normal((n_bits, dim)).astype(np.float32)
-        self._w /= np.sqrt(np.float32(dim))
-
-    def project(self, vec: np.ndarray) -> np.ndarray:
-        v = np.asarray(vec, dtype=np.float32)
-        if v.shape != (self.dim,):
-            raise ValueError(f"ожидался вектор формы ({self.dim},), получен {v.shape}")
-        n = float(np.linalg.norm(v))
-        s = self._w @ v if n == 0.0 else self._w @ (v / n)
-        return np.where(s >= 0.0, np.int8(1), np.int8(-1))
 
 
 class SDREncoder:

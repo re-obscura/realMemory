@@ -1,7 +1,6 @@
-"""Кодирование: эмбеддеры, биполярные адреса (L1), разреженные SDR (L2)."""
+"""Кодирование: эмбеддеры и разреженные SDR (L2)."""
 from .embedder import EmbeddingProvider, HashingEmbedder
 from .sdr import (
-    BipolarProjector,
     CalibrationStats,
     SDREncoder,
     calibrate_sparse,
@@ -11,7 +10,6 @@ from .sdr import (
 )
 
 __all__ = [
-    "BipolarProjector",
     "CalibrationStats",
     "EmbeddingProvider",
     "HashingEmbedder",

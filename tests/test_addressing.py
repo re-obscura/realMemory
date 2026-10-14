@@ -113,16 +113,3 @@ def test_out_of_range_unit_raises():
         idx.write(np.array([N_UNITS + 1]), 1)
     with pytest.raises(ValueError):
         idx.query(np.array([-1]), 5)
-
-
-def test_state_roundtrip():
-    idx = SDRVotingIndex(N_UNITS, bucket_cap=8)
-    rng = np.random.default_rng(7)
-    sdrs = [_rand_sdr(rng) for _ in range(20)]
-    for p, sdr in enumerate(sdrs):
-        idx.write(sdr, p)
-    fresh = SDRVotingIndex(N_UNITS, bucket_cap=8)
-    fresh.load_state_dict(idx.state_dict())
-    for p, sdr in enumerate(sdrs):
-        qr = fresh.query(sdr, 1)
-        assert qr.candidates.size >= 1 and int(qr.candidates[0]) == p

@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 from realmemory.encoding.sdr import (
-    BipolarProjector,
     SDREncoder,
     calibrate_sparse,
     jaccard,
@@ -51,9 +50,6 @@ def test_wrong_shape_raises():
 def test_zero_vector_conventions():
     enc = SDREncoder(DIM, 256, 16, seed=1)
     assert enc.encode(np.zeros(DIM, dtype=np.float32)).size == 0
-    proj = BipolarProjector(DIM, 128, seed=1)
-    out = proj.project(np.zeros(DIM, dtype=np.float32))
-    assert out.dtype == np.int8 and np.all(out == 1)
 
 
 def test_overlap_monotone_in_cosine():

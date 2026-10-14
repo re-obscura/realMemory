@@ -96,15 +96,3 @@ class SDRVotingIndex:
         """Средняя длина бакета — мера суперпозиции/давления ёмкости."""
         filled = [len(b) for b in self._buckets if b]
         return float(np.mean(filled)) if filled else 0.0
-
-    def state_dict(self) -> dict:
-        return {"buckets": {i: list(b) for i, b in enumerate(self._buckets) if b}}
-
-    def load_state_dict(self, state: dict) -> None:
-        for b in self._buckets:
-            b.clear()
-        for i, items in state.get("buckets", {}).items():
-            u = int(i)
-            if not 0 <= u < self.n_units:
-                raise ValueError(f"юнит {u} вне диапазона")
-            self._buckets[u].extend(int(p) for p in items)
