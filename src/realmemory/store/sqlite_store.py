@@ -12,11 +12,14 @@ BEGIN IMMEDIATE на мутациях исключают потерю состо
   elig_sources  следы-источники события (для reward-матчинга)
   events        журнал пластичности (бывший journal.jsonl): аудит и статистика
   db_meta       маркер эмбеддера, конфиг, служебные счётчики/метки
+
+Схема/DDL и миграции — store/schema.py, мэппинг строк и FTS-утилиты —
+store/rows.py; ниже ре-экспорты для совместимости (тесты и внешние
+импорты ссылаются на имена из этого модуля).
 """
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -28,376 +31,33 @@ from pathlib import Path
 import numpy as np
 
 from ..types import STATUS_ACTIVE, MemoryRecord
-
-# Версия схемы; растёт при несовместимых изменениях. Миграции выполняются
-# при открытии по цепочке от сохранённой версии, каждая мутация схемы
-# предваряется страховочной копией базы.
-SCHEMA_VERSION = 3
-
-# Цепочка миграций по целевым версиям. Индексы по колонкам, которых могло не
-# быть раньше, живут здесь и в быстром пути свежей схемы — не в базовом
-# CREATE-скрипте, иначе он ломает открытие унаследованных баз.
-_MIGRATION_V1 = (
-    "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'",
-    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
+from ._sql import _bump_meta, _chunked, _qmarks, _upsert_meta
+from .rows import (  # noqa: F401 - ре-экспорт для совместимости (тесты, hippocampus)
+    _COLS,
+    _COLS_LIGHT,
+    _INSERT_SQL,
+    _pack_f32,
+    _pack_i32,
+    _row_to_record,
+    build_fts_query,
+    scope_key,
+    search_tokens,
+    tokenize,
 )
-
-_MIGRATION_V2 = (
-    "ALTER TABLE memories ADD COLUMN author TEXT NOT NULL DEFAULT ''",
-    """
-    CREATE TABLE IF NOT EXISTS publications (
-        id TEXT PRIMARY KEY,
-        trace_id INTEGER NOT NULL,
-        project TEXT NOT NULL DEFAULT '',
-        author TEXT NOT NULL DEFAULT '',
-        published_at REAL NOT NULL,
-        revoked_at REAL,
-        content_hash TEXT NOT NULL DEFAULT ''
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_memories_author ON memories(author)",
-    "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
+from .schema import (  # noqa: F401 - ре-экспорт для совместимости
+    _FTS_STATEMENTS,
+    _SCHEMA_STATEMENTS,
+    SCHEMA_VERSION,
+    _migrate_schema,
 )
-
-_MIGRATION_V3 = (
-    "ALTER TABLE publications ADD COLUMN synced_at REAL",
-    "CREATE INDEX IF NOT EXISTS idx_publications_synced ON publications(synced_at)",
-)
-
-_SCHEMA_CHAIN: list[tuple[int, tuple]] = [
-    (1, _MIGRATION_V1), (2, _MIGRATION_V2), (3, _MIGRATION_V3),
-]
-
-
-def _is_duplicate_column(exc: sqlite3.OperationalError) -> bool:
-    return "duplicate column name" in str(exc).lower()
-
-
-def _upsert_meta(con: sqlite3.Connection, key: str, value: str) -> None:
-    """Вставить/заменить ключ db_meta внутри текущей транзакции."""
-    con.execute(
-        "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, str(value)),
-    )
-
-
-def _bump_meta(con: sqlite3.Connection, key: str, delta: float = 1,
-               *, is_float: bool = False) -> None:
-    """Атомарно прибавить delta к счётчику db_meta внутри текущей транзакции."""
-    if is_float:
-        con.execute(
-            "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET "
-            "value=CAST(CAST(value AS REAL)+? AS TEXT)",
-            (key, repr(float(delta)), float(delta)),
-        )
-    else:
-        con.execute(
-            "INSERT INTO db_meta(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET "
-            "value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
-            (key, str(int(delta)), int(delta)),
-        )
-
-
-def _chunked(ids: Sequence[int | str]) -> Iterator[list[int | str]]:
-    """Порции по _SQL_CHUNK: SQLite ограничивает число параметров запроса,
-    длинные IN-списки режутся на части."""
-    for start in range(0, len(ids), _SQL_CHUNK):
-        yield list(ids[start:start + _SQL_CHUNK])
-
-
-def _qmarks(n: int) -> str:
-    return ",".join("?" * n)
-
-
-def _migrate_schema(conn: sqlite3.Connection, lock: threading.Lock,
-                    backup_factory) -> str:
-    """Довести схему до SCHEMA_VERSION по цепочке миграций.
-
-    Свежая база рождается с полной схемой и получает метку версии без мутаций;
-    унаследованные проходят недостающие шаги, каждой мутации предшествует
-    страховочная копия (после успешного шага). Повторный запуск частично
-    обновлённой базы терпит «колонка уже существует». Возвращает версию."""
-    with lock:
-        row = conn.execute(
-            "SELECT value FROM db_meta WHERE key='schema_version'"
-        ).fetchone()
-        stored = int(row[0]) if row else None
-
-    def mark(target: int) -> None:
-        with lock:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                _upsert_meta(conn, "schema_version", str(target))
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-
-    if stored == SCHEMA_VERSION:
-        return str(SCHEMA_VERSION)
-    if stored is None:
-        with lock:
-            cols = {r[1] for r in conn.execute(
-                "PRAGMA table_info(memories)").fetchall()}
-            pubs_cols = {r[1] for r in conn.execute(
-                "PRAGMA table_info(publications)").fetchall()}
-            complete = ("author" in cols and "synced_at" in pubs_cols
-                        and bool(conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' "
-                            "AND name='publications'").fetchone()))
-        if complete:
-            # свежая база: достроить идемпотентные индексы «мигрирующих»
-            # колонок (их нет в базовом скрипте) и зафиксировать версию
-            with lock:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    for idx in (
-                        "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
-                        "CREATE INDEX IF NOT EXISTS idx_memories_author ON memories(author)",
-                        "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
-                        "CREATE INDEX IF NOT EXISTS idx_publications_synced ON publications(synced_at)",
-                    ):
-                        conn.execute(idx)
-                    # версия фиксируется той же транзакцией: mark() здесь нельзя —
-                    # его внутренний lock нерекурсивен
-                    _upsert_meta(conn, "schema_version", str(SCHEMA_VERSION))
-                    conn.execute("COMMIT")
-                except BaseException:
-                    conn.execute("ROLLBACK")
-                    raise
-            return str(SCHEMA_VERSION)
-        # базы до появления нумерации: наличие scope отличает v0.3+ от v0.2-
-        stored = 1 if "scope" in cols else 0
-
-    version = max(stored, 0)
-    for target, statements in _SCHEMA_CHAIN:
-        if version >= target:
-            continue
-        backup_factory()
-        with lock:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                for stmt in statements:
-                    try:
-                        conn.execute(stmt)
-                    except sqlite3.OperationalError as exc:
-                        if not (_is_duplicate_column(exc)
-                                and stmt.lstrip().upper().startswith("ALTER")):
-                            raise
-                # версия фиксируется той же транзакцией, что и DDL: атомарно
-                _upsert_meta(conn, "schema_version", str(target))
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            version = target
-    return str(version)
-
-# Схема списком стейтментов: executescript() внутри BEGIN не годится
-# (он неявно коммитит транзакцию).
-_SCHEMA_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS memories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        text TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        meta TEXT NOT NULL,
-        embedding BLOB NOT NULL,
-        sdr BLOB NOT NULL,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL,
-        reinforced_count INTEGER NOT NULL DEFAULT 0,
-        last_reinforced_at REAL NOT NULL,
-        base_strength REAL NOT NULL DEFAULT 1.0,
-        valid_from REAL NOT NULL,
-        valid_to REAL,
-        superseded_by INTEGER,
-        scope TEXT NOT NULL DEFAULT 'global',
-        author TEXT NOT NULL DEFAULT ''
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS publications (
-        id TEXT PRIMARY KEY,
-        trace_id INTEGER NOT NULL,
-        project TEXT NOT NULL DEFAULT '',
-        author TEXT NOT NULL DEFAULT '',
-        published_at REAL NOT NULL,
-        revoked_at REAL,
-        content_hash TEXT NOT NULL DEFAULT '',
-        synced_at REAL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
-    "CREATE INDEX IF NOT EXISTS idx_publications_trace ON publications(trace_id)",
-    """
-    CREATE TABLE IF NOT EXISTS edges (
-        key INTEGER PRIMARY KEY,
-        w REAL NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS eligibility (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        src BLOB NOT NULL,
-        dst BLOB NOT NULL,
-        strength REAL NOT NULL,
-        created_at REAL NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS elig_sources (
-        seq INTEGER NOT NULL REFERENCES eligibility(seq) ON DELETE CASCADE,
-        mem_id INTEGER NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_elig_sources_mem ON elig_sources(mem_id)",
-    """
-    CREATE TABLE IF NOT EXISTS events (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts REAL NOT NULL,
-        type TEXT NOT NULL,
-        data TEXT NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)",
-    """
-    CREATE TABLE IF NOT EXISTS db_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-    )
-    """,
-)
-
-_INSERT_SQL = (
-    "INSERT INTO memories(text,kind,status,meta,embedding,sdr,"
-    "created_at,updated_at,reinforced_count,last_reinforced_at,base_strength,"
-    "valid_from,valid_to,superseded_by,scope,author) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-)
-
-_COLS = (
-    "id,text,kind,status,meta,embedding,sdr,created_at,updated_at,"
-    "reinforced_count,last_reinforced_at,base_strength,valid_from,valid_to,superseded_by,scope,author"
-)
-
-# колоночный «лёгкий» срез для проходов «сна»: динамика следа без блобов
-_COLS_LIGHT = "id,kind,created_at,last_reinforced_at,base_strength,reinforced_count"
-
-# SQLite ограничивает число параметров запроса: длинные IN-списки режем
-_SQL_CHUNK = 500
-
-# батч журнала событий в iter_events (замок на порцию — как в iter_active)
-_EVENTS_BATCH = 256
 
 
 class StorageError(Exception):
     """Повреждение или недоступность хранилища."""
 
 
-# Гибридный поиск: внешне-содержимый FTS5 поверх текстов следа.
-# Создаётся отдельно от основной схемы: сборка SQLite без FTS5
-# не должна ломать открытие базы — ядро просто теряет keyword-канал.
-_FTS_STATEMENTS = (
-    """
-    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-        text,
-        content='memories',
-        content_rowid='id',
-        tokenize='unicode61 remove_diacritics 2'
-    )
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
-        INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, text)
-        VALUES ('delete', old.id, old.text);
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE OF text ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, text)
-        VALUES ('delete', old.id, old.text);
-        INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
-    END
-    """,
-)
-
-_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
-
-# ключ канонического сравнения скоупов: регистр и разновид разделителей
-# («CPM.Backend», «cpm_backend», «cpm backend») не должны расщеплять проект —
-# на живых данных догфудинга один проект жил под тремя именами, и recall
-# между ними не пересекался
-_SCOPE_KEY_RE = re.compile(r"[._\- ]+")
-
-
-def scope_key(name: str) -> str:
-    return _SCOPE_KEY_RE.sub(".", str(name).casefold())
-
-
-def tokenize(text: str) -> list[str]:
-    """Токены для keyword-канала: слова в нижнем регистре (unicode)."""
-    return [t.lower() for t in _TOKEN_RE.findall(text)]
-
-
-def search_tokens(text: str) -> set[str]:
-    """Токены, значимые для сопоставления запроса и следа: 1-символьные
-    отбрасываются синхронно с build_fts_query, иначе каналы определяют
-    «токен» по-разному и full_match ведёт себя несогласованно."""
-    return {t for t in tokenize(text) if len(t) > 1}
-
-
-def build_fts_query(text: str, max_terms: int = 12) -> str | None:
-    """Выражение MATCH из токенов запроса: "tok1" OR "tok2" ..."""
-    seen: dict[str, None] = {}
-    for t in tokenize(text):
-        if len(t) > 1:
-            seen.setdefault(t)
-        if len(seen) >= max_terms:
-            break
-    if not seen:
-        return None
-    return " OR ".join(f'"{t}"' for t in seen)
-
-
-def _pack_f32(v: np.ndarray) -> bytes:
-    return np.asarray(v, dtype=np.float32).tobytes()
-
-
-def _pack_i32(v: np.ndarray) -> bytes:
-    return np.asarray(v, dtype=np.int32).tobytes()
-
-
-def _row_to_record(row: tuple, dim: int) -> MemoryRecord:
-    (rid, text, kind, status, meta_json, emb_b, sdr_b, created, updated,
-     rcount, rlast, base, vfrom, vto, sby, scope, author) = row
-    return MemoryRecord(
-        id=int(rid),
-        text=text,
-        kind=kind,
-        status=status,
-        meta=json.loads(meta_json),
-        embedding=np.frombuffer(emb_b, dtype=np.float32, count=dim).copy(),
-        sdr=np.frombuffer(sdr_b, dtype=np.int32).copy(),
-        created_at=float(created),
-        updated_at=float(updated),
-        reinforced_count=int(rcount),
-        last_reinforced_at=float(rlast),
-        base_strength=float(base),
-        valid_from=float(vfrom),
-        valid_to=None if vto is None else float(vto),
-        superseded_by=None if sby is None else int(sby),
-        scope=str(scope),
-        author=str(author or ""),
-    )
+# батч журнала событий в iter_events (замок на порцию — как в iter_active)
+_EVENTS_BATCH = 256
 
 
 class MemoryStore:

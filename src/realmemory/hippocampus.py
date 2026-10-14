@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import pickle
 import re
 import time
 from collections.abc import Sequence
@@ -32,6 +31,7 @@ from .core.assembly import AssemblyNetwork
 from .core.plasticity import EligibilityLog
 from .encoding.embedder import EmbeddingProvider, HashingEmbedder
 from .encoding.sdr import SDREncoder
+from .legacy import migrate_legacy_files
 from .policies.decay import reinforce_values, retention, should_promote, weaken_value
 from .policies.novelty import gate_for_author
 from .store.sqlite_store import MemoryStore, build_fts_query, search_tokens
@@ -54,8 +54,6 @@ from .types import (
 )
 
 _DB_NAME = "memory.db"
-_LEGACY_SNAPSHOT = "snapshot.pkl"
-_LEGACY_JOURNAL = "journal.jsonl"
 
 _NAMESPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
@@ -84,6 +82,94 @@ class _EventLog:
 
     def count(self) -> int:
         return self._store.event_count()
+
+
+class _RecallScorer:
+    """Скоринг кандидатов recall: ветвление direct/keyword с retention-множителем.
+
+    Вынесен из Hippocampus.recall (~50 строк замыканий с nonlocal), чтобы
+    ветвление можно было тестировать без хранилища. Экземпляр живёт один
+    вызов recall: накапливает items/seen и флаг полного keyword-матча.
+    Формула уверенности зафиксирована в docs/CONTRACTS.md — менять сюда
+    только вместе с контрактом."""
+
+    def __init__(
+        self,
+        *,
+        config: MemoryConfig,
+        now: float,
+        kw_ids: set[int],
+        query_tokens: set[str] | None,
+        scope: str | None,
+        all_scopes: bool,
+        include_superseded: bool,
+        w_votes_eff: float,
+    ) -> None:
+        self.config = config
+        self.now = now
+        self.kw_ids = kw_ids
+        self.query_tokens = query_tokens
+        self.scope = scope
+        self.all_scopes = all_scopes
+        self.include_superseded = include_superseded
+        self.w_votes_eff = w_votes_eff
+        # наполняются голосовательным окном в режиме votes перед evaluate
+        self.qr_active = 0
+        self.votes_map: dict[int, int] = {}
+        # (confidence, cosine, retention, record, source) — сортировка в recall
+        self.items: list[tuple[float, float, float, MemoryRecord, str]] = []
+        self.seen: set[int] = set()
+        self.has_full_match = False
+
+    def _conf_direct(self, cos: float, votes_norm: float, ret: float) -> float:
+        return cos * (self.w_votes_eff + (1 - self.w_votes_eff) * min(1.0, votes_norm)) * (
+            _ret_factor(ret)
+        )
+
+    def evaluate(self, rec: MemoryRecord, cos: float) -> None:
+        """Ветвление скоринга одного кандидата (общее для обоих проходов).
+        Косинус приходит предвычисленным: точный скан считает его gemv,
+        FTS-довесок и голосовательное окно — векторно по стопке строк."""
+        cfg = self.config
+        if rec.status != STATUS_ACTIVE and not self.include_superseded:
+            return
+        if not Hippocampus._scope_allows(rec.scope, self.scope, self.all_scopes):
+            return
+        cos = max(0.0, cos)
+        ret = retention(rec.base_strength, rec.last_reinforced_at, self.now, rec.kind,
+                        cfg)
+        if ret < cfg.min_retention_recall:
+            return
+        # полный keyword-матч (все токены запроса есть в следе): точное
+        # совпадение надёжнее слабого косинуса; источник остаётся direct,
+        # если косинус сам прошёл порог, keyword — только когда семантики
+        # не хватило и держит нас токен
+        full_match = False
+        doc_tokens: set[str] | None = None
+        if rec.id in self.kw_ids and self.query_tokens:
+            doc_tokens = search_tokens(rec.text)
+            full_match = bool(self.query_tokens <= doc_tokens)
+        if cos >= cfg.cos_min_recall:
+            vnorm = self.votes_map.get(rec.id, 0) / max(1, self.qr_active)
+            c = self._conf_direct(cos, vnorm, ret)
+            if full_match:
+                c = max(c, cfg.w_keyword * _ret_factor(ret))
+                self.has_full_match = True
+            source = SOURCE_DIRECT
+        elif full_match:
+            c = cfg.w_keyword * _ret_factor(ret)
+            source = SOURCE_KEYWORD
+            self.has_full_match = True
+        elif rec.id in self.kw_ids and self.query_tokens and doc_tokens is not None:
+            overlap = len(doc_tokens & self.query_tokens) / len(self.query_tokens)
+            if overlap <= 0.0:
+                return
+            c = cfg.w_keyword * overlap * _ret_factor(ret)
+            source = SOURCE_KEYWORD
+        else:
+            return
+        self.items.append((c, cos, ret, rec, source))
+        self.seen.add(rec.id)
 
 
 class Hippocampus:
@@ -117,7 +203,7 @@ class Hippocampus:
             # порождают векторов и не должны спорить с боевым эмбеддером базы
             self._check_embedder_identity()
         self._check_db_config()
-        self._migrate_legacy_files()
+        migrate_legacy_files(self.path, self.store, self.clock)
         self.sdr_encoder = SDREncoder(
             self.config.dim, self.config.n_units, self.config.k_sparse, self.config.sdr_seed
         )
@@ -212,56 +298,6 @@ class Hippocampus:
                     f"конфиг не совпадает с базой {self.path} по полю {key}: "
                     f"в базе {other[key]}, открывается с {getattr(self.config, key)}"
                 )
-
-    def _migrate_legacy_files(self) -> None:
-        """Однократный перенос наследия v0.3 (journal.jsonl, snapshot.pkl) в БД."""
-        jp = self.path / _LEGACY_JOURNAL
-        if jp.exists() and self.store.get_meta("journal_imported") is None:
-            imported = 0
-            for line in jp.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                etype = str(event.pop("type", "unknown"))
-                ts = float(event.pop("ts", event.pop("t", 0.0)))
-                if etype == "write":
-                    # до v0.4 журналировались только вставки (гейт CREATE)
-                    event.setdefault("action", "create")
-                self.store.event_append(etype, event, ts=ts)
-                imported += 1
-            self.store.set_meta("journal_imported", "1")
-            jp.rename(jp.with_name(jp.name + ".imported"))
-            self.store.event_append("legacy_journal_imported",
-                                    {"events": imported}, ts=float(self.clock.now()))
-
-        sp = self.path / _LEGACY_SNAPSHOT
-        if sp.exists() and self.store.get_meta("snapshot_imported") is None:
-            try:
-                with sp.open("rb") as f:
-                    payload = pickle.load(f)
-                net = payload.get("network", {})
-                keys = np.asarray(net.get("keys"), dtype=np.int64).reshape(-1)
-                ws = np.asarray(net.get("weights"), dtype=np.float32).reshape(-1)
-                last_tick = net.get("last_tick")
-                self.store.edges_import(keys, ws, None if last_tick is None else float(last_tick))
-                for src, dst, strength, created_at, source_ids in (
-                    payload.get("eligibility", {}).get("events", [])
-                ):
-                    self.store.elig_add(np.asarray(src, dtype=np.int32),
-                                        np.asarray(dst, dtype=np.int32),
-                                        float(strength), float(created_at),
-                                        [int(i) for i in source_ids])
-                status: dict[str, Any] = {"edges": int(keys.size)}
-            except Exception as exc:  # noqa: BLE001 - битый снапшот не должен блокировать базу
-                status = {"error": str(exc)}
-            self.store.set_meta("snapshot_imported", "1")
-            sp.rename(sp.with_name(sp.name + ".imported"))
-            self.store.event_append("legacy_snapshot_imported", status,
-                                    ts=float(self.clock.now()))
 
     def _reindex_all(self) -> None:
         """Полная пересборка волатильных структур из БД: L1-бакеты, юнит-индекс,
@@ -752,81 +788,36 @@ class Hippocampus:
         kw_ids = set(self._fts_candidates(query, limit=k * self.config.recall_oversample))
         query_tokens = search_tokens(query) or None
 
-        items: list[tuple[float, float, float, MemoryRecord, str]] = []
-        seen: set[int] = set()
-        has_full_match = False
         w_votes_eff = 1.0 if use_exact else self.config.w_votes
-        qr_active = 0
-        votes_map: dict[int, int] = {}
-
-        def conf_direct(cos: float, votes_norm: float, ret: float) -> float:
-            return cos * (w_votes_eff + (1 - w_votes_eff) * min(1.0, votes_norm)) * (
-                _ret_factor(ret)
-            )
-
-        def evaluate(rec: MemoryRecord, cos: float) -> None:
-            """Ветвление скоринга одного кандидата (общее для обоих проходов).
-            Косинус приходит предвычисленным: точный скан считает его gemv,
-            FTS-довесок и голосовательное окно — векторно по стопке строк."""
-            nonlocal has_full_match
-            if rec.status != STATUS_ACTIVE and not include_superseded:
-                return
-            if not self._scope_allows(rec.scope, scope, all_scopes):
-                return
-            cos = max(0.0, cos)
-            ret = retention(rec.base_strength, rec.last_reinforced_at, now, rec.kind,
-                            self.config)
-            if ret < self.config.min_retention_recall:
-                return
-            # полный keyword-матч (все токены запроса есть в следе): точное
-            # совпадение надёжнее слабого косинуса; источник остаётся direct,
-            # если косинус сам прошёл порог, keyword — только когда семантики
-            # не хватило и держит нас токен
-            full_match = False
-            doc_tokens: set[str] | None = None
-            if rec.id in kw_ids and query_tokens:
-                doc_tokens = search_tokens(rec.text)
-                full_match = bool(query_tokens <= doc_tokens)
-            if cos >= self.config.cos_min_recall:
-                vnorm = votes_map.get(rec.id, 0) / max(1, qr_active)
-                c = conf_direct(cos, vnorm, ret)
-                if full_match:
-                    c = max(c, self.config.w_keyword * _ret_factor(ret))
-                    has_full_match = True
-                source = SOURCE_DIRECT
-            elif full_match:
-                c = self.config.w_keyword * _ret_factor(ret)
-                source = SOURCE_KEYWORD
-                has_full_match = True
-            elif rec.id in kw_ids and query_tokens and doc_tokens is not None:
-                overlap = len(doc_tokens & query_tokens) / len(query_tokens)
-                if overlap <= 0.0:
-                    return
-                c = self.config.w_keyword * overlap * _ret_factor(ret)
-                source = SOURCE_KEYWORD
-            else:
-                return
-            items.append((c, cos, ret, rec, source))
-            seen.add(rec.id)
+        scorer = _RecallScorer(
+            config=self.config,
+            now=now,
+            kw_ids=kw_ids,
+            query_tokens=query_tokens,
+            scope=scope,
+            all_scopes=all_scopes,
+            include_superseded=include_superseded,
+            w_votes_eff=w_votes_eff,
+        )
 
         if not use_exact:
             qr = self.index.query(
                 sdr,
                 max_candidates=self._candidate_budget(k * self.config.recall_oversample),
             )
-            qr_active = int(qr.active_locations)
-            votes_map = {
+            scorer.qr_active = int(qr.active_locations)
+            scorer.votes_map = {
                 int(p): int(v) for p, v in zip(qr.candidates.tolist(), qr.votes.tolist())
             }
-            candidates = list(votes_map.keys()) + sorted(
-                rid for rid in kw_ids if rid not in votes_map
+            candidates = list(scorer.votes_map.keys()) + sorted(
+                rid for rid in kw_ids if rid not in scorer.votes_map
             )
             recs = self.store.get_many(candidates)
             if recs:
                 qv = self._unit(emb)
                 sims = np.stack([r.embedding for r in recs]) @ qv
                 for rec, sim in zip(recs, sims.tolist()):
-                    evaluate(rec, sim)
+                    scorer.evaluate(rec, sim)
 
         if use_exact:
             ranked_ids, ranked_cos = self._cosine_ranked(emb)
@@ -839,25 +830,28 @@ class Hippocampus:
             while start < len(ranked_ids):
                 stop_ids = [int(i) for i in ranked_ids[start:start + step].tolist()]
                 for rec in self.store.get_many(stop_ids):
-                    evaluate(rec, float(rank_cos_by_id.get(rec.id, 0.0)))
+                    scorer.evaluate(rec, float(rank_cos_by_id.get(rec.id, 0.0)))
                 start += step
                 # ранний выход между подбатчами: топ-k укомплектован, объём
                 # разведки не меньше окна голосования, а сильнейший из остатка
                 # не может вытеснить слабейшего в выбранном
                 # (у direct-канала c <= cos при w_votes_eff = 1)
-                if len(items) >= k and start >= window_target:
+                if len(scorer.items) >= k and start >= window_target:
                     next_best_cos = float(ranked_cos[start]) if start < len(ranked_cos) else 0.0
-                    if next_best_cos <= min(it[0] for it in items):
+                    if next_best_cos <= min(it[0] for it in scorer.items):
                         break
             # проход B: все FTS-кандидаты вне уже оценённых — keyword-буст
             # обязан сохранить шансы независимо от глубины в рейтинге
-            kw_extras = sorted(rid for rid in kw_ids if rid not in seen)
+            kw_extras = sorted(rid for rid in kw_ids if rid not in scorer.seen)
             if kw_extras:
                 qv = self._unit(emb)
                 for rec in self.store.get_many(kw_extras):
                     cos = float(np.dot(rec.embedding, qv)) if rec.embedding.size else 0.0
-                    evaluate(rec, cos)
+                    scorer.evaluate(rec, cos)
 
+        items = scorer.items
+        seen = scorer.seen
+        has_full_match = scorer.has_full_match
         items.sort(key=lambda t: (-t[0], t[3].id))
         items = items[:k]
 

@@ -1,0 +1,1372 @@
+{
+ "exact_True": [
+  {
+   "query": "deploy pipeline failed at gateway",
+   "items": [
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.867472,
+     "confidence": 0.562343,
+     "retention": 0.497506,
+     "source": "direct",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "borsh cooking recipe",
+   "items": [
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.684653,
+     "confidence": 0.436783,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "postgres миграция схемы",
+   "items": [
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.831607,
+     "confidence": 0.530534,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.034752,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "ECONNREFUSED",
+   "items": [],
+   "abstained": true
+  },
+  {
+   "query": "quarterly roadmap review friday notes",
+   "items": [
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.894427,
+     "confidence": 0.89224,
+     "retention": 0.996506,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.066815,
+     "confidence": 0.034101,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "asyncio exception",
+   "items": [
+    {
+     "memory_id": 4,
+     "text": "python asyncio taskgroup exception handling",
+     "kind": "episodic",
+     "cosine": 0.668153,
+     "confidence": 0.426256,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "память агента следы",
+   "items": [
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.63901,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.044194,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "completely unrelated noise about quantum bots",
+   "items": [],
+   "abstained": true
+  },
+  {
+   "query": "deploy pipeline failed at gateway",
+   "items": [
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.867472,
+     "confidence": 0.562343,
+     "retention": 0.497506,
+     "source": "direct",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.104006,
+     "confidence": 0.053082,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.035806,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "borsh cooking recipe",
+   "items": [
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.684653,
+     "confidence": 0.436783,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "meeting notes review",
+   "items": [
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.654654,
+     "confidence": 0.653053,
+     "retention": 0.996506,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.076139,
+     "confidence": 0.039486,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.045644,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 4,
+     "text": "python asyncio taskgroup exception handling",
+     "kind": "episodic",
+     "cosine": 0.043033,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.04714,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "nothing matches this zzzqqq",
+   "items": [],
+   "abstained": true
+  },
+  {
+   "query": "beetroot",
+   "items": [
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.534522,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.063888,
+     "confidence": 0.050985,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.069007,
+     "confidence": 0.035219,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "taskgroup",
+   "items": [
+    {
+     "memory_id": 4,
+     "text": "python asyncio taskgroup exception handling",
+     "kind": "episodic",
+     "cosine": 0.471405,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "миграция",
+   "items": [
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.56149,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "deploy pipeline failed at gateway",
+   "items": [
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.867472,
+     "confidence": 0.562343,
+     "retention": 0.497506,
+     "source": "direct",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  }
+ ],
+ "exact_False": [
+  {
+   "query": "deploy pipeline failed at gateway",
+   "items": [
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.867472,
+     "confidence": 0.528261,
+     "retention": 0.497506,
+     "source": "direct",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "borsh cooking recipe",
+   "items": [
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.684653,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "postgres миграция схемы",
+   "items": [
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.831607,
+     "confidence": 0.468118,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.034752,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "ECONNREFUSED",
+   "items": [],
+   "abstained": true
+  },
+  {
+   "query": "quarterly roadmap review friday notes",
+   "items": [
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.894427,
+     "confidence": 0.795781,
+     "retention": 0.996506,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.066815,
+     "confidence": 0.034101,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "asyncio exception",
+   "items": [
+    {
+     "memory_id": 4,
+     "text": "python asyncio taskgroup exception handling",
+     "kind": "episodic",
+     "cosine": 0.668153,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "память агента следы",
+   "items": [
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.63901,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.044194,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "completely unrelated noise about quantum bots",
+   "items": [],
+   "abstained": true
+  },
+  {
+   "query": "deploy pipeline failed at gateway",
+   "items": [
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.867472,
+     "confidence": 0.528261,
+     "retention": 0.497506,
+     "source": "direct",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.104006,
+     "confidence": 0.053082,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.035806,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "borsh cooking recipe",
+   "items": [
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.684653,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "meeting notes review",
+   "items": [
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.654654,
+     "confidence": 0.64841,
+     "retention": 0.996506,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.076139,
+     "confidence": 0.039486,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.045644,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 4,
+     "text": "python asyncio taskgroup exception handling",
+     "kind": "episodic",
+     "cosine": 0.043033,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.04714,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "nothing matches this zzzqqq",
+   "items": [],
+   "abstained": true
+  },
+  {
+   "query": "beetroot",
+   "items": [
+    {
+     "memory_id": 2,
+     "text": "cooking recipe borsh with beetroot and beef",
+     "kind": "episodic",
+     "cosine": 0.534522,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.063888,
+     "confidence": 0.050985,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 6,
+     "text": "память агента хранит следы и забывает лишнее",
+     "kind": "episodic",
+     "cosine": 0.069007,
+     "confidence": 0.035219,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "taskgroup",
+   "items": [
+    {
+     "memory_id": 4,
+     "text": "python asyncio taskgroup exception handling",
+     "kind": "episodic",
+     "cosine": 0.471405,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "миграция",
+   "items": [
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.56149,
+     "confidence": 0.414675,
+     "retention": 0.482803,
+     "source": "direct",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.02593,
+     "retention": 0.497506,
+     "source": "associated",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  },
+  {
+   "query": "deploy pipeline failed at gateway",
+   "items": [
+    {
+     "memory_id": 7,
+     "text": "deploy pipeline failed with ECONNRESET at gateway",
+     "kind": "episodic",
+     "cosine": 0.867472,
+     "confidence": 0.528261,
+     "retention": 0.497506,
+     "source": "direct",
+     "created_at": 1700003000.0,
+     "updated_at": 1700003000.0,
+     "meta": {
+      "supersedes": 1
+     },
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 3,
+     "text": "meeting notes: quarterly roadmap review on friday",
+     "kind": "semantic",
+     "cosine": 0.0,
+     "confidence": 0.039902,
+     "retention": 0.996506,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    },
+    {
+     "memory_id": 5,
+     "text": "база данных postgres миграция схемы v3",
+     "kind": "episodic",
+     "cosine": 0.0,
+     "confidence": 0.025518,
+     "retention": 0.482803,
+     "source": "associated",
+     "created_at": 1700000000.0,
+     "updated_at": 1700000000.0,
+     "meta": {},
+     "scope": "proj",
+     "author": ""
+    }
+   ],
+   "abstained": false
+  }
+ ]
+}
