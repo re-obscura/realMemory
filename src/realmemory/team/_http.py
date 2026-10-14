@@ -16,6 +16,7 @@ import json
 import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, cast
 
 import numpy as np
 
@@ -104,18 +105,30 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._slots.release()
 
 
+class TeamHTTPServer(BoundedThreadingHTTPServer):
+    """HTTP-сервер командного слоя с типизированным контекстом демона.
+
+    state назначает конкретный демон (CoordinatorState | PeerState) сразу после
+    сборки; token — общий секрет команды (None = демон без аутентификации).
+    Раньше атрибуты лепились снаружи с type: ignore — теперь это часть
+    контракта класса."""
+
+    state: Any  # CoordinatorState | PeerState
+    token: str | None
+
+
 class TeamHandler(BaseHTTPRequestHandler):
     """Общие части координатора и peer: токен, JSON, ответы, тишина в лог."""
 
     max_body_bytes = MAX_BODY_BYTES
 
     @property
-    def state(self):
-        return self.server.state  # type: ignore[attr-defined]
+    def state(self) -> Any:
+        return cast("TeamHTTPServer", self.server).state
 
     @property
     def expected_token(self) -> str | None:
-        return getattr(self.server, "token", None)  # type: ignore[attr-defined]
+        return cast("TeamHTTPServer", self.server).token
 
     def log_message(self, fmt, *args) -> None:  # тихие демоны
         return

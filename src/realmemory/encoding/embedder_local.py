@@ -11,8 +11,9 @@ HF (~470 МБ) и работает локально, без сети и без �
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 
@@ -64,14 +65,23 @@ class FastEmbedProvider:
             ) from exc
         self.model_name = model_name
         self._prefixes = "e5" in model_name.lower()
-        kwargs = {
-            "model_name": model_name,
-            "cache_dir": str(Path(cache_dir)) if cache_dir else str(default_cache_dir()),
-        }
-        self._model = TextEmbedding(**kwargs)
+        # явные ключи вместо splat-словаря: mypy не умеет сопоставлять
+        # dict[str, str] с перегрузками конструктора fastembed
+        self._model = TextEmbedding(
+            model_name=model_name,
+            cache_dir=str(Path(cache_dir)) if cache_dir else str(default_cache_dir()),
+        )
         self._lock = threading.Lock()
-        probe = next(self._model.embed(["dim probe"]))
+        probe = self._vec_of_model(self._model, ["dim probe"])
         self.dim = int(dim) if dim is not None else int(probe.shape[0])
+
+    @staticmethod
+    def _vec_of_model(model: Any, texts: list[str]) -> np.ndarray:
+        """Первый вектор ответа fastembed. Стабы fastembed между версиями
+        колеблются между Iterator[ndarray] и ndarray — приводим к итератору
+        в одном месте, у типизированной точки входа."""
+        out = cast("Iterator[np.ndarray]", model.embed(texts))
+        return next(out)
 
     @property
     def name(self) -> str:
@@ -89,7 +99,7 @@ class FastEmbedProvider:
             return np.zeros(self.dim, dtype=np.float32)
         payload = (prefix + text.strip()) if self._prefixes else text.strip()
         with self._lock:
-            vec = next(self._model.embed([payload]))
+            vec = self._vec_of_model(self._model, [payload])
         v = np.asarray(vec, dtype=np.float32)
         n = float(np.linalg.norm(v))
         return v / n if n > 0.0 else v
@@ -106,4 +116,4 @@ class FastEmbedProvider:
     def available_models() -> list[str]:
         from fastembed import TextEmbedding
 
-        return list(TextEmbedding.list_supported_models())
+        return [str(m.get("model", "")) for m in TextEmbedding.list_supported_models()]

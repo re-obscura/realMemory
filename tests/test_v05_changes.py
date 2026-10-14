@@ -14,7 +14,7 @@ from realmemory.types import MemoryRecord
 def _rec(i: int, dim: int = 8, k: int = 4) -> MemoryRecord:
     rng = np.random.default_rng(900 + i)
     return MemoryRecord(
-        id=None,
+        id=0,  # id назначит store при вставке
         text=f"row {i}",
         kind="episodic",
         status="active",

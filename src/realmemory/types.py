@@ -80,9 +80,12 @@ class ConsolidationReport:
 
 @dataclass
 class MemoryRecord:
-    """Внутренняя единица хранения. Живёт в SQLite, кэшируется фасадом."""
+    """Внутренняя единица хранения. Живёт в SQLite, кэшируется фасадом.
 
-    id: int | None
+    id назначается хранилищем при вставке (AUTOINCREMENT); MemoryStore.insert
+    его игнорирует, поэтому pre-insert площадки передают 0 — у всех записей,
+    возвращённых store, id уже настоящий."""
+    id: int
     text: str
     kind: str
     status: str

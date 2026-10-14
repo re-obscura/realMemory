@@ -36,9 +36,9 @@ from pathlib import Path
 
 from ._http import (
     BadRequest,
-    BoundedThreadingHTTPServer,
     PayloadTooLarge,
     TeamHandler,
+    TeamHTTPServer,
     cosine_scores,
     decode_vector_b64,
     finite_float,
@@ -264,9 +264,9 @@ class CoordinatorHandler(TeamHandler):
 
 def make_server(data_dir, host="127.0.0.1", port=8400, token=None):
     """Собрать сервер (для тестов: порт 0 → фактический из server_address)."""
-    srv = BoundedThreadingHTTPServer((host, int(port)), CoordinatorHandler)
-    srv.state = CoordinatorState(Path(data_dir))  # type: ignore[attr-defined]
-    srv.token = token  # type: ignore[attr-defined]
+    srv = TeamHTTPServer((host, int(port)), CoordinatorHandler)
+    srv.state = CoordinatorState(Path(data_dir))
+    srv.token = token
     return srv
 
 

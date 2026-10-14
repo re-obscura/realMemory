@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING
 
 from ._http import (
     BadRequest,
-    BoundedThreadingHTTPServer,
     PayloadTooLarge,
     TeamHandler,
+    TeamHTTPServer,
     cosine_scores,
     decode_vector_b64,
 )
@@ -164,9 +164,9 @@ class PeerHandler(TeamHandler):
 
 def make_peer_server(root, host="127.0.0.1", port=8410, token=None):
     require_bind_token(host, token, what="peer-endpoint")
-    srv = BoundedThreadingHTTPServer((host, int(port)), PeerHandler)
-    srv.state = PeerState(Path(root))  # type: ignore[attr-defined]
-    srv.token = token  # type: ignore[attr-defined]
+    srv = TeamHTTPServer((host, int(port)), PeerHandler)
+    srv.state = PeerState(Path(root))
+    srv.token = token
     return srv
 
 

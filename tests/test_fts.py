@@ -24,7 +24,7 @@ def test_store_fts_match_and_sync(tmp_path):
     def rec(text: str) -> MemoryRecord:
         rng = np.random.default_rng(1)
         return MemoryRecord(
-            id=None, text=text, kind="episodic", status="active", meta={},
+            id=0, text=text, kind="episodic", status="active", meta={},
             embedding=rng.standard_normal(8).astype(np.float32),
             sdr=np.array([0, 1, 2, 3], dtype=np.int32),
             created_at=1.0, updated_at=1.0, reinforced_count=0,

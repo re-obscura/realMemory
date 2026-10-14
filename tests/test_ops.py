@@ -12,7 +12,7 @@ from realmemory.types import MemoryRecord
 def _rec(i: int, dim=8, k=4) -> MemoryRecord:
     rng = np.random.default_rng(200 + i)
     return MemoryRecord(
-        id=None,
+        id=0,  # id назначит store при вставке
         text=f"ops fact {i}",
         kind="episodic",
         status="active",

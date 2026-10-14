@@ -267,10 +267,10 @@ class Hippocampus:
         """Производные структуры при открытии: L1-бакеты, юнит-индекс, кэш
         эмбеддингов, CSR рёбер."""
         for rec in self.store.iter_active():
-            self.index.write(rec.sdr, int(rec.id))
+            self.index.write(rec.sdr, rec.id)
             for u in rec.sdr.tolist():
-                self._unit_index.setdefault(int(u), set()).add(int(rec.id))
-            self._cache_append(int(rec.id), rec.embedding)
+                self._unit_index.setdefault(int(u), set()).add(rec.id)
+            self._cache_append(rec.id, rec.embedding)
         self._reload_network_cache()
 
     # -- кэш эмбеддингов (точный скан) ------------------------------------------
@@ -335,10 +335,10 @@ class Hippocampus:
         self._emb_len = 0
         self._emb_pos.clear()
         for rec in self.store.iter_active():
-            self.index.write(rec.sdr, int(rec.id))
+            self.index.write(rec.sdr, rec.id)
             for u in rec.sdr.tolist():
-                self._unit_index.setdefault(int(u), set()).add(int(rec.id))
-            self._cache_append(int(rec.id), rec.embedding)
+                self._unit_index.setdefault(int(u), set()).add(rec.id)
+            self._cache_append(rec.id, rec.embedding)
         self._trace_count = self.store.count(status=STATUS_ACTIVE)
         self._mem_rev_seen = rev
 
@@ -441,9 +441,9 @@ class Hippocampus:
                         if not self._scope_allows(rec.scope, scope, all_scopes=False):
                             continue
                         if best_id is None:
-                            best_id, best_cos = int(rec.id), cos
+                            best_id, best_cos = rec.id, cos
                         elif cos >= self.config.theta_link and len(near_ids) < 4:
-                            near_ids.append((cos, int(rec.id)))
+                            near_ids.append((cos, rec.id))
             return best_id, best_cos, tuple(i for _, i in sorted(near_ids, key=lambda t: -t[0]))
 
         qr = self.index.query(
@@ -471,7 +471,7 @@ class Hippocampus:
                     continue
                 if not self._scope_allows(rec.scope, scope, all_scopes=False):
                     continue
-                scored.append((int(rec.id), max(0.0, sim)))
+                scored.append((rec.id, max(0.0, sim)))
         if not scored:
             return None, 0.0, ()
         scored.sort(key=lambda t: -t[1])
@@ -486,10 +486,12 @@ class Hippocampus:
             return True
         return rec_scope == scope or rec_scope == SCOPE_GLOBAL
 
-    def _insert_memory(self, text, kind, meta, now, emb, sdr,
+    def _insert_memory(self, text: str, kind: str, meta: dict[str, Any] | None,
+                       now: float, emb: np.ndarray, sdr: np.ndarray,
                        scope: str = SCOPE_GLOBAL, author: str | None = None) -> int:
         rec = MemoryRecord(
-            id=None,
+            # id назначит store при вставке (AUTOINCREMENT); до вставки он не читается
+            id=0,
             text=text,
             kind=kind,
             status=STATUS_ACTIVE,
@@ -619,6 +621,8 @@ class Hippocampus:
             best_cosine=best_cos,
         )
         if action is DecisionAction.REINFORCE:
+            if best_id is None:  # инвариант гейта: REINFORCE бывает только при цели
+                raise RuntimeError("REINFORCE без целевого следа")
             self._reinforce(best_id, now)
             mid = best_id
             created = False
@@ -764,11 +768,11 @@ class Hippocampus:
             # не хватило и держит нас токен
             full_match = False
             doc_tokens: set[str] | None = None
-            if int(rec.id) in kw_ids and query_tokens:
+            if rec.id in kw_ids and query_tokens:
                 doc_tokens = search_tokens(rec.text)
                 full_match = bool(query_tokens <= doc_tokens)
             if cos >= self.config.cos_min_recall:
-                vnorm = votes_map.get(int(rec.id), 0) / max(1, qr_active)
+                vnorm = votes_map.get(rec.id, 0) / max(1, qr_active)
                 c = conf_direct(cos, vnorm, ret)
                 if full_match:
                     c = max(c, self.config.w_keyword * ret_factor(ret))
@@ -778,7 +782,7 @@ class Hippocampus:
                 c = self.config.w_keyword * ret_factor(ret)
                 source = SOURCE_KEYWORD
                 has_full_match = True
-            elif int(rec.id) in kw_ids and query_tokens and doc_tokens is not None:
+            elif rec.id in kw_ids and query_tokens and doc_tokens is not None:
                 overlap = len(doc_tokens & query_tokens) / len(query_tokens)
                 if overlap <= 0.0:
                     return
@@ -787,7 +791,7 @@ class Hippocampus:
             else:
                 return
             items.append((c, cos, ret, rec, source))
-            seen.add(int(rec.id))
+            seen.add(rec.id)
 
         if not use_exact:
             qr = self.index.query(
@@ -820,7 +824,7 @@ class Hippocampus:
             while start < len(ranked_ids):
                 stop_ids = [int(i) for i in ranked_ids[start:start + step].tolist()]
                 for rec in self.store.get_many(stop_ids):
-                    evaluate(rec, float(rank_cos_by_id.get(int(rec.id), 0.0)))
+                    evaluate(rec, float(rank_cos_by_id.get(rec.id, 0.0)))
                 start += step
                 # ранний выход между подбатчами: топ-k укомплектован, объём
                 # разведки не меньше окна голосования, а сильнейший из остатка
@@ -922,13 +926,13 @@ class Hippocampus:
                     continue
                 c = self.config.assoc_confidence_penalty * _assoc_cos_floor(cos) * (0.3 + 0.7 * ret)
                 extras.append((c, cos, ret, rec, SOURCE_ASSOCIATED))
-                seen.add(int(rec.id))
+                seen.add(rec.id)
             extras.sort(key=lambda t: (-t[0], t[3].id))
             items += extras[: k - len(items)]
 
         out = tuple(
             RecalledMemory(
-                memory_id=int(rec.id),
+                memory_id=rec.id,
                 text=rec.text,
                 kind=rec.kind,
                 cosine=round(cos, 6),

@@ -66,7 +66,9 @@ class DecisionAction(Enum): CREATE | REINFORCE | LINK
     elapsed_ms: float
 
 @dataclass MemoryRecord:  # internal storage unit
-    id, text, kind, status, meta,
+    id: int                      # assigned by the store on insert (AUTOINCREMENT);
+                                 # insert() ignores it — pre-insert sites pass 0
+    text, kind, status, meta,
     embedding, sdr,
     created_at, updated_at, reinforced_count, last_reinforced_at,
     base_strength, valid_from, valid_to, superseded_by,

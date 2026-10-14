@@ -41,11 +41,8 @@ target-version = "py311"
 "tests/*" = ["E402", "E702"]
 
 [tool.mypy]
+# 3.12, хотя requires-python = ">=3.11": стабы numpy используют type-statement
+# 3.12 и не парсятся под 3.11. Целевая синтаксическая совместимость с 3.11
+# обеспечивается ruff target-version = py311.
 python_version = "3.12"
 ignore_missing_imports = true
-
-# технический долг типизации: MemoryRecord.id Optional до вставки,
-# нестабильные стабы fastembed — ужесточить отдельным проходом
-[[tool.mypy.overrides]]
-module = ["realmemory.hippocampus", "realmemory.encoding.embedder_local"]
-disable_error_code = ["arg-type", "call-overload"]
