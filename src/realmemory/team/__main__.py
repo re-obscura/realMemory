@@ -6,6 +6,8 @@ import json
 import os
 import sys
 
+from .._streams import force_utf8_streams
+
 
 def _open_store(path: str):
     from pathlib import Path
@@ -16,24 +18,17 @@ def _open_store(path: str):
 
 
 def _policy_or_die(args):
-    from .identity import resolve_identity
-    from .policy import load_policy
+    from .policy import load_policy_with_identity
 
-    policy = load_policy(args.policy_path)
-    if not policy.identity:
-        policy.identity = resolve_identity()
-    return policy
+    return load_policy_with_identity(args.policy_path)
 
 
 def cmd_status(args) -> int:
     from . import registry as reg
-    from .identity import resolve_identity
-    from .policy import load_policy
+    from .policy import load_policy_with_identity
     from .view import projects_view
 
-    policy = load_policy(args.policy_path)
-    if not policy.identity:
-        policy.identity = resolve_identity()
+    policy = load_policy_with_identity(args.policy_path)
     store = _open_store(args.path)
     try:
         views = projects_view(store, policy)
@@ -167,72 +162,14 @@ def cmd_recall_team(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="realmemory-team",
-                                     description="командный слой realMemory")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    def add_common(p, need_path=True):
-        p.add_argument("--path", required=need_path, help="каталог базы памяти")
-        p.add_argument("--policy-path", default=None,
-                       help="путь к team.yaml (по умолчанию ~/.realmemory/team.yaml)")
-
-    u = sub.add_parser("ui", help="интерактивный выбор публикаций (Textual)")
-    add_common(u)
-    u.set_defaults(fn=cmd_ui)
-
-    s = sub.add_parser("status", help="сводка по проектам и registry")
-    add_common(s)
-    s.add_argument("--json", action="store_true")
-    s.set_defaults(fn=cmd_status)
-
-    pl = sub.add_parser("policy", help="показать путь/содержимое политики")
-    pl.add_argument("action", nargs="?", choices=["show", "path", "init"],
-                    default="show")
-    pl.add_argument("--policy-path", default=None)
-    pl.set_defaults(fn=cmd_policy)
-
-    sy = sub.add_parser("sync",
-                        help="довести публикации/отзывы до координатора")
-    add_common(sy)
-    sy.add_argument("--timeout", type=float, default=4.0)
-    sy.set_defaults(fn=cmd_sync)
-
-    rt = sub.add_parser("recall-team", help="поиск по кэшу команды")
-    add_common(rt)
-    rt.add_argument("query")
-    rt.add_argument("--k", type=int, default=5)
-    rt.add_argument("--author", default=None)
-    rt.add_argument("--project", default=None)
-    rt.add_argument("--json", action="store_true")
-    rt.set_defaults(fn=cmd_recall_team)
-
-    sv = sub.add_parser("serve",
-                        help="живой peer-endpoint + presence-хартбиты")
-    sv.add_argument("--path", required=True)
-    sv.add_argument("--host", default="127.0.0.1",
-                    help="адрес привязки (для LAN: 0.0.0.0)")
-    sv.add_argument("--port", type=int, default=8410)
-    sv.add_argument("--advertise", default=None,
-                    help="адрес для presence вместо автоопределённого LAN IP")
-    sv.add_argument("--policy-path", default=None)
-    sv.set_defaults(fn=cmd_serve)
-
-    args = parser.parse_args(argv)
-    return args.fn(args)
-
-
 def cmd_serve(args) -> int:  # pragma: no cover - долгоживущий демон
     """Живой peer-endpoint + периодический presence-хартбит."""
     import threading
 
-    from .identity import resolve_identity
     from .peer import lan_ip, make_peer_server, start_heartbeat
-    from .policy import load_policy
+    from .policy import load_policy_with_identity
 
-    policy = load_policy(args.policy_path)
-    if not policy.identity:
-        policy.identity = resolve_identity()
+    policy = load_policy_with_identity(args.policy_path)
     token = os.environ.get(policy.token_env or "", "").strip() or None
     # binding на 0.0.0.0 слушает все интерфейсы, но в presence рекламировать
     # его нельзя: коллега уйдёт connect'иться на свой же localhost
@@ -257,6 +194,63 @@ def cmd_serve(args) -> int:  # pragma: no cover - долгоживущий де�
         stop.set()
         srv.server_close()
     return 0
+
+
+def main(argv=None) -> int:
+    force_utf8_streams()  # кириллица в stdout: на Windows-пайпах иначе cp1252
+    parser = argparse.ArgumentParser(prog="realmemory-team",
+                                     description="командный слой realMemory")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    def add_common(p, need_path=True):
+        if need_path:
+            p.add_argument("--path", required=True,
+                           help="каталог базы памяти")
+        p.add_argument("--policy-path", default=None,
+                       help="путь к team.yaml (по умолчанию ~/.realmemory/team.yaml)")
+
+    u = sub.add_parser("ui", help="интерактивный выбор публикаций (Textual)")
+    add_common(u)
+    u.set_defaults(fn=cmd_ui)
+
+    s = sub.add_parser("status", help="сводка по проектам и registry")
+    add_common(s)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status)
+
+    pl = sub.add_parser("policy", help="показать путь/содержимое политики")
+    pl.add_argument("action", nargs="?", choices=["show", "path", "init"],
+                    default="show")
+    add_common(pl, need_path=False)
+    pl.set_defaults(fn=cmd_policy)
+
+    sy = sub.add_parser("sync",
+                        help="довести публикации/отзывы до координатора")
+    add_common(sy)
+    sy.add_argument("--timeout", type=float, default=4.0)
+    sy.set_defaults(fn=cmd_sync)
+
+    rt = sub.add_parser("recall-team", help="поиск по кэшу команды")
+    add_common(rt)
+    rt.add_argument("query")
+    rt.add_argument("--k", type=int, default=5)
+    rt.add_argument("--author", default=None)
+    rt.add_argument("--project", default=None)
+    rt.add_argument("--json", action="store_true")
+    rt.set_defaults(fn=cmd_recall_team)
+
+    sv = sub.add_parser("serve",
+                        help="живой peer-endpoint + presence-хартбиты")
+    add_common(sv)
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="адрес привязки (для LAN: 0.0.0.0)")
+    sv.add_argument("--port", type=int, default=8410)
+    sv.add_argument("--advertise", default=None,
+                    help="адрес для presence вместо автоопределённого LAN IP")
+    sv.set_defaults(fn=cmd_serve)
+
+    args = parser.parse_args(argv)
+    return args.fn(args)
 
 
 if __name__ == "__main__":

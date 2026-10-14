@@ -38,7 +38,6 @@ def _cfg(**over) -> MemoryConfig:
 # -- схема v2 и авторство -------------------------------------------------------------
 
 def test_fresh_db_is_v2_with_author_and_publications(tmp_path):
-    store = _store = None
     from realmemory.store.sqlite_store import MemoryStore
 
     store = MemoryStore(tmp_path / "m.db", dim=8)
@@ -229,8 +228,8 @@ def test_publish_refuses_foreign_authorship(tmp_path):
         con.execute("UPDATE memories SET author='andrey' WHERE id=?", (mid,))
         con.commit(); con.close()
         with pytest.raises(registry.RegistryError, match="andrey"):
-            registry.publish(h.store, [mid], policy={**env.policy.__dict__
-                               } and _policy(tmp_path), now=5.0, identity="me")
+            registry.publish(h.store, [mid], policy=_policy(tmp_path),
+                             now=5.0, identity="me")
     finally:
         h.close()
 

@@ -105,93 +105,96 @@ def run(
 ) -> dict:
     rng = np.random.default_rng(seed + 1)
     cfg = config or _bench_config(n_facts)
-    tmp = Path(tempfile.mkdtemp(prefix="rm_bench_"))
-    hippo = Hippocampus.open(tmp / "rm", config=cfg)
-    try:
-        corpus = _make_corpus(n_facts, seed)
-        t0 = time.perf_counter()
-        ids = [hippo.remember(text).memory_id for text, _ in corpus]
-        write_s = time.perf_counter() - t0
-        emb_matrix = np.stack([hippo.embedder.embed(text) for text, _ in corpus])
-        norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        emb_matrix /= norms
-
-        query_idx = rng.choice(len(corpus), size=min(n_queries, len(corpus)), replace=False)
-        # факты, слитые гейтом новизны в чужой след (лексические близнецы
-        # объектных токенов — поведение системы, их следа не существует);
-        # полноту извлечения считаем только по собственным следам,
-        # доля слияний публикуется отдельной метрикой
-        id_counts = Counter(ids)
-        singleton_target = {i: id_counts[ident] == 1 for i, ident in enumerate(ids)}
-        pipe_hits = 0
-        base_hits = 0
-        evaluated = 0
-        latencies: list[float] = []
-        confidences: list[float] = []
-        for qi in query_idx:
-            text, fi = corpus[int(qi)]
-            q = _subset_query(text, fi, rng)
-            packet = hippo.recall(q, k=k)
-            latencies.append(packet.latency_ms)
-            if singleton_target[fi]:
-                evaluated += 1
-                pipe_hits += int(any(item.memory_id == ids[fi] for item in packet.items))
-                q_emb = hippo.embedder.embed(q)
-                qn = float(np.linalg.norm(q_emb))
-                sims = emb_matrix @ (q_emb / qn if qn else q_emb)
-                top = np.argpartition(-sims, min(k, sims.size) - 1)[:k]
-                base_hits += int(fi in {int(t) for t in top})
-            if packet.items:
-                confidences.append(packet.items[0].confidence)
-
-        abstained = 0
-        base_noise_top1: list[float] = []
-        for _ in range(max(20, n_queries // 5)):
-            noise = " ".join(str(x) for x in rng.choice(_NOISE_POOL, size=3, replace=False))
-            packet = hippo.recall(noise, k=k)
-            abstained += int(packet.abstained)
-            q_emb = hippo.embedder.embed(noise)
-            qn = float(np.linalg.norm(q_emb))
-            if qn:
-                sims = emb_matrix @ (q_emb / qn)
-                base_noise_top1.append(float(sims.max()))
-        n_noise = max(20, n_queries // 5)
-
-        lat = np.asarray(latencies)
-
-        # восстановление состояния: время пересборки производных структур
-        # (L1-бакеты, юнит-индекс, CSR рёбер) при открытии базы
-        hippo.close()
-        t_open = time.perf_counter()
+    # TemporaryDirectory вместо mkdtemp: каталог с базой удаляется сам,
+    # как в bench_real (ignore_cleanup_errors — WAL-файлы на Windows)
+    with tempfile.TemporaryDirectory(prefix="rm_bench_", ignore_cleanup_errors=True) as td:
+        tmp = Path(td)
         hippo = Hippocampus.open(tmp / "rm", config=cfg)
-        reopen_ms = (time.perf_counter() - t_open) * 1000.0
+        try:
+            corpus = _make_corpus(n_facts, seed)
+            t0 = time.perf_counter()
+            ids = [hippo.remember(text).memory_id for text, _ in corpus]
+            write_s = time.perf_counter() - t0
+            emb_matrix = np.stack([hippo.embedder.embed(text) for text, _ in corpus])
+            norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            emb_matrix /= norms
 
-        hits_pipe = round(pipe_hits / max(1, evaluated), 4)
-        hits_base = round(base_hits / max(1, evaluated), 4)
-        abstain_rate = round(abstained / n_noise, 4)
-        merged_share = round(1.0 - len(set(ids)) / max(1, len(ids)), 4)
-        metrics: dict[str, float | str] = {
-            "n_facts": n_facts,
-            "gate_merged_share": merged_share,
-            "evaluated_queries": evaluated,
-            "pipeline_hits@k": hits_pipe,
-            "baseline_hits@k": hits_base,
-            "abstention_on_noise": abstain_rate,
-            "baseline_noise_top1_cos_mean": round(float(np.mean(base_noise_top1)), 4),
-            "recall_p50_ms": round(float(np.percentile(lat, 50)), 3),
-            "recall_p95_ms": round(float(np.percentile(lat, 95)), 3),
-            "writes_per_sec": round(len(ids) / max(write_s, 1e-9), 1),
-            "mean_top1_confidence": round(float(np.mean(confidences)) if confidences else 0.0, 4),
-            "reopen_rebuild_ms": round(reopen_ms, 1),
-        }
-        ok = hits_pipe >= hits_base - 0.02 and abstain_rate >= 0.9
-        metrics["phase0_gate"] = "PASS" if ok else "FAIL"
-        if verbose:
-            _print_table(metrics, k)
-        return metrics
-    finally:
-        hippo.close()
+            query_idx = rng.choice(len(corpus), size=min(n_queries, len(corpus)), replace=False)
+            # факты, слитые гейтом новизны в чужой след (лексические близнецы
+            # объектных токенов — поведение системы, их следа не существует);
+            # полноту извлечения считаем только по собственным следам,
+            # доля слияний публикуется отдельной метрикой
+            id_counts = Counter(ids)
+            singleton_target = {i: id_counts[ident] == 1 for i, ident in enumerate(ids)}
+            pipe_hits = 0
+            base_hits = 0
+            evaluated = 0
+            latencies: list[float] = []
+            confidences: list[float] = []
+            for qi in query_idx:
+                text, fi = corpus[int(qi)]
+                q = _subset_query(text, fi, rng)
+                packet = hippo.recall(q, k=k)
+                latencies.append(packet.latency_ms)
+                if singleton_target[fi]:
+                    evaluated += 1
+                    pipe_hits += int(any(item.memory_id == ids[fi] for item in packet.items))
+                    q_emb = hippo.embedder.embed(q)
+                    qn = float(np.linalg.norm(q_emb))
+                    sims = emb_matrix @ (q_emb / qn if qn else q_emb)
+                    top = np.argpartition(-sims, min(k, sims.size) - 1)[:k]
+                    base_hits += int(fi in {int(t) for t in top})
+                if packet.items:
+                    confidences.append(packet.items[0].confidence)
+
+            abstained = 0
+            base_noise_top1: list[float] = []
+            for _ in range(max(20, n_queries // 5)):
+                noise = " ".join(str(x) for x in rng.choice(_NOISE_POOL, size=3, replace=False))
+                packet = hippo.recall(noise, k=k)
+                abstained += int(packet.abstained)
+                q_emb = hippo.embedder.embed(noise)
+                qn = float(np.linalg.norm(q_emb))
+                if qn:
+                    sims = emb_matrix @ (q_emb / qn)
+                    base_noise_top1.append(float(sims.max()))
+            n_noise = max(20, n_queries // 5)
+
+            lat = np.asarray(latencies)
+
+            # восстановление состояния: время пересборки производных структур
+            # (L1-бакеты, юнит-индекс, CSR рёбер) при открытии базы
+            hippo.close()
+            t_open = time.perf_counter()
+            hippo = Hippocampus.open(tmp / "rm", config=cfg)
+            reopen_ms = (time.perf_counter() - t_open) * 1000.0
+
+            hits_pipe = round(pipe_hits / max(1, evaluated), 4)
+            hits_base = round(base_hits / max(1, evaluated), 4)
+            abstain_rate = round(abstained / n_noise, 4)
+            merged_share = round(1.0 - len(set(ids)) / max(1, len(ids)), 4)
+            metrics: dict[str, float | str] = {
+                "n_facts": n_facts,
+                "gate_merged_share": merged_share,
+                "evaluated_queries": evaluated,
+                "pipeline_hits@k": hits_pipe,
+                "baseline_hits@k": hits_base,
+                "abstention_on_noise": abstain_rate,
+                "baseline_noise_top1_cos_mean": round(float(np.mean(base_noise_top1)), 4),
+                "recall_p50_ms": round(float(np.percentile(lat, 50)), 3),
+                "recall_p95_ms": round(float(np.percentile(lat, 95)), 3),
+                "writes_per_sec": round(len(ids) / max(write_s, 1e-9), 1),
+                "mean_top1_confidence": round(float(np.mean(confidences)) if confidences else 0.0, 4),
+                "reopen_rebuild_ms": round(reopen_ms, 1),
+            }
+            ok = hits_pipe >= hits_base - 0.02 and abstain_rate >= 0.9
+            metrics["phase0_gate"] = "PASS" if ok else "FAIL"
+            if verbose:
+                _print_table(metrics, k)
+            return metrics
+        finally:
+            hippo.close()
 
 
 def _print_table(m: dict, k: int) -> None:

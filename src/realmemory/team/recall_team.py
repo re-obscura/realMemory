@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import os
 import re
-import sqlite3
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from ..team.identity import resolve_identity
 from .policy import TeamPolicy, load_policy
@@ -65,20 +63,14 @@ def _safe_peer_address(address: str) -> str | None:
 
 
 def _brain_meta(root_path) -> tuple[str, int]:
-    """(имя эмбеддера базы, dim); пустое имя для несуществующего мозга."""
-    db = Path(root_path) / "memory.db"
-    if not db.exists():
-        return "", 256
-    con = sqlite3.connect(str(db))
-    try:
-        emb = con.execute(
-            "SELECT value FROM db_meta WHERE key='embedder'").fetchone()
-        row = con.execute(
-            "SELECT length(embedding) FROM memories LIMIT 1").fetchone()
-    finally:
-        con.close()
-    name = str(emb[0]) if emb else ""
-    return name, (int(row[0]) // 4 if row else 256)
+    """(имя эмбеддера базы, dim); пустое имя для несуществующего мозга.
+
+    read_meta — тот же лёгкий читатель db_meta, что у хуков и peer: битая
+    база не поднимает исключение, а отдаёт дефолты."""
+    from ..store import read_meta
+
+    meta = read_meta(root_path)
+    return meta.embedder, meta.dim
 
 
 def embed_query_text(root_path, text: str) -> tuple[object, str]:
@@ -86,7 +78,8 @@ def embed_query_text(root_path, text: str) -> tuple[object, str]:
     имя берём из db_meta (оно же маркер собственных публикаций). Несовпадение
     с чужими записями ловит получатель (peer/координатор) честным 409.
 
-    Неизвестный эмбеддер — явная ошибка, а не молчаливый HashingEmbedder:
+    Известные имена пересобираются единой фабрикой encoding.make_embedder;
+    неизвестный эмбеддер — явная ошибка, а не молчаливый HashingEmbedder:
     несовместимые векторы дали бы бессмысленный recall без единой ошибки."""
     name, dim = _brain_meta(root_path)
     if not name:
@@ -96,18 +89,18 @@ def embed_query_text(root_path, text: str) -> tuple[object, str]:
         embedder = HashingEmbedder(dim=dim)
         return embedder.embed(text), embedder.name
     if name.startswith("fastembed:"):
-        from ..encoding.embedder_local import FastEmbedProvider
+        from ..encoding.embedder import make_embedder
 
-        provider = FastEmbedProvider()
+        provider = make_embedder("local")
         if provider.name != name:
             raise RuntimeError(
                 f"база писалась эмбеддером {name!r}, а установленный "
                 f"fastembed даёт {provider.name!r} — синхронизируйте модель")
         return provider.embed_query(text), provider.name
     if name.startswith("hashing("):
-        from ..encoding.embedder import HashingEmbedder
+        from ..encoding.embedder import make_embedder
 
-        embedder = HashingEmbedder(dim=dim)
+        embedder = make_embedder("hashing", dim=dim)
         if embedder.name != name:
             raise RuntimeError(
                 f"база писалась эмбеддером {name!r}, а пересборка по dim={dim} "

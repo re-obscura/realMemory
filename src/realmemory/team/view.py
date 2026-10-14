@@ -49,11 +49,9 @@ def projects_view(store, policy: TeamPolicy) -> list[ProjectView]:
             view.records.append((rec, decision.status, decision.reason))
             if decision.status == ELIGIBLE:
                 view.eligible += 1
-        statuses = {s for _, s, _ in view.records}
         view.blocked = sum(1 for _, s, _ in view.records
                            if s.startswith("blocked"))
         view.total = max(view.total, len(view.records))   # count() может отставать от iter
-        del statuses
         views.append(view)
     return views
 

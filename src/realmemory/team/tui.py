@@ -19,7 +19,13 @@ from textual.widgets import DataTable, Footer, Header, Static
 from ..store.sqlite_store import MemoryStore
 from . import registry
 from .identity import resolve_identity
-from .policy import ELIGIBLE, TeamPolicy, load_policy, save_policy, set_project_shareable
+from .policy import (
+    ELIGIBLE,
+    TeamPolicy,
+    load_policy_with_identity,
+    save_policy,
+    set_project_shareable,
+)
 from .view import ProjectView, find_project, projects_view
 
 _GLYPH_PICKED = "☑"
@@ -91,9 +97,7 @@ class TeamApp(App):
         super().__init__()
         self._root = root
         self._policy_path = policy_path
-        self.policy: TeamPolicy = load_policy(policy_path)
-        if not self.policy.identity:
-            self.policy.identity = resolve_identity()
+        self.policy: TeamPolicy = load_policy_with_identity(policy_path)
         self.store = _store_for(root)
         self.views: list[ProjectView] = []
         self.current: str | None = None

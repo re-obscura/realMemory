@@ -131,6 +131,14 @@ class MemoryConfig:
         if self.exact_scan_max_traces < 1:
             raise ValueError("exact_scan_max_traces должен быть >= 1")
 
+    def apply_profile(self, profile: dict[str, float]) -> None:
+        """Профиль порогов конкретного эмбеддера (recommended_thresholds):
+        абсолютные пороги не переносятся между эмбеддерами из-за анизотропии
+        моделей, поэтому калибровка задаётся провайдером сверху. Значения
+        приводятся к float; валидность проверяет validate()."""
+        for key, val in profile.items():
+            setattr(self, key, float(val))
+
     @classmethod
     def dev(cls) -> MemoryConfig:
         """Конфиг по умолчанию (hashing dim=256) — историческое имя для тестов

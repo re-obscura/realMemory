@@ -28,15 +28,13 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-import sys
 import threading
 import time
-import traceback
 from pathlib import Path
 
+import numpy as np
+
 from ._http import (
-    BadRequest,
-    PayloadTooLarge,
     TeamHandler,
     TeamHTTPServer,
     cosine_scores,
@@ -162,7 +160,6 @@ class CoordinatorState:
             return [], {"error": "embedder_mismatch",
                         "known_embedders": known,
                         "requested": embedder}
-        import numpy as np
 
         vecs = [np.frombuffer(r[4], dtype=np.float32) for r in comparable]
         keep = [i for i, v in enumerate(vecs) if v.size == q.size]
@@ -218,48 +215,38 @@ class CoordinatorHandler(TeamHandler):
             return self._send(200, {"ok": True})
         if not self._authorized():
             return self._send(401, {"error": "unauthorized"})
-        try:
-            payload = self._read_json()
-        except PayloadTooLarge as exc:
-            return self._send(413, {"error": str(exc)})
-        except BadRequest as exc:
-            return self._send(400, {"error": str(exc)})
-        try:
-            if path == "/heartbeat":
-                self.state.heartbeat(str(payload.get("identity", "")),
-                                     str(payload.get("address", "")),
-                                     payload.get("projects"))
-                return self._send(200, {"ok": True,
-                                        "ttl_s": PRESENCE_TTL_S})
-            if path == "/publish":
-                n = self.state.publish(payload.get("items") or [])
-                return self._send(200, {"accepted": n,
-                                        "received": len(payload.get("items") or [])})
-            if path == "/retract":
-                n = self.state.retract(payload.get("tombstones") or [])
-                return self._send(200, {"retracted": n})
-            if path == "/search":
-                embedder = str(payload.get("embedder", ""))
-                if not embedder:
-                    # без имени эмбеддера косинус несравним ни с чем: честный отказ
-                    return self._send(400, {"error": "embedder required"})
-                hits, meta = self.state.search(
-                    str(payload.get("query_embedding_b64", "")),
-                    int(payload.get("k") or 5),
-                    embedder,
-                    payload.get("author"), payload.get("project"))
-                code = 409 if meta.get("error") == "embedder_mismatch" else 200
-                return self._send(code, {"hits": hits, **meta})
-        except (KeyError, TypeError) as exc:
-            return self._send(400, {"error": f"bad request: {exc}"})
-        except BadRequest as exc:
-            return self._send(400, {"error": str(exc)})
-        except ValueError as exc:
-            return self._send(400, {"error": f"bad request: {exc}"})
-        except Exception:  # noqa: BLE001 - соединению нужен ответ ВСЕГДА
-            traceback.print_exc(file=sys.stderr)
-            return self._send(500, {"error": "internal error"})
-        return self._send(404, {"error": "not found"})
+        payload = self._read_body()
+        if payload is None:
+            return None
+        return self._dispatch(lambda: self._route_post(path, payload))
+
+    def _route_post(self, path: str, payload: dict) -> tuple[int, dict]:
+        """Тело маршрута без лестницы ошибок: она общая, в TeamHandler._dispatch."""
+        if path == "/heartbeat":
+            self.state.heartbeat(str(payload.get("identity", "")),
+                                 str(payload.get("address", "")),
+                                 payload.get("projects"))
+            return 200, {"ok": True, "ttl_s": PRESENCE_TTL_S}
+        if path == "/publish":
+            n = self.state.publish(payload.get("items") or [])
+            return 200, {"accepted": n,
+                         "received": len(payload.get("items") or [])}
+        if path == "/retract":
+            n = self.state.retract(payload.get("tombstones") or [])
+            return 200, {"retracted": n}
+        if path == "/search":
+            embedder = str(payload.get("embedder", ""))
+            if not embedder:
+                # без имени эмбеддера косинус несравним ни с чем: честный отказ
+                return 400, {"error": "embedder required"}
+            hits, meta = self.state.search(
+                str(payload.get("query_embedding_b64", "")),
+                int(payload.get("k") or 5),
+                embedder,
+                payload.get("author"), payload.get("project"))
+            code = 409 if meta.get("error") == "embedder_mismatch" else 200
+            return code, {"hits": hits, **meta}
+        return 404, {"error": "not found"}
 
 
 def make_server(data_dir, host="127.0.0.1", port=8400, token=None):

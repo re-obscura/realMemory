@@ -276,6 +276,11 @@ def render(report: dict[str, Any]) -> str:
 
 
 def main(argv=None) -> None:
+    # отчёт печатает кириллицу: на Windows-пайпе (cp1252) без этого —
+    # UnicodeEncodeError; тот же урок, что hook_cli решил через _streams
+    from ._streams import force_utf8_streams
+
+    force_utf8_streams()
     parser = argparse.ArgumentParser(prog="realmemory-report")
     parser.add_argument("--path", required=True, help="каталог базы памяти")
     parser.add_argument("--namespace", default=None, help="подкаталог внутри --path")

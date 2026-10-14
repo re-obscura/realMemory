@@ -54,8 +54,7 @@ def _dist(xs: list[float]) -> dict:
 def _load_profile(cfg, embedder) -> None:
     profile = getattr(embedder, "recommended_thresholds", None)
     if profile:
-        for key, val in profile.items():
-            setattr(cfg, key, float(val))
+        cfg.apply_profile(profile)
     cfg.validate()
 
 

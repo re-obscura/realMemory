@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .identity import resolve_identity
+
 DEFAULT_POLICY_PATH = Path.home() / ".realmemory" / "team.yaml"
 
 _LOOPBACK_HOSTS = frozenset({"", "127.0.0.1", "::1", "localhost"})
@@ -148,6 +150,19 @@ def load_policy(path: Path | None = None) -> TeamPolicy:
             policy.never_meta_tags = [str(t) for t in ne["meta_tags"]]
         if ne.get("text_patterns"):
             policy.never_text_patterns = [str(x) for x in ne["text_patterns"]]
+    return policy
+
+
+def load_policy_with_identity(path: Path | str | None = None) -> TeamPolicy:
+    """load_policy + подстановка identity, если в team.yaml её нет.
+
+    Общий бутстрап CLI/TUI (status/sync/serve/ui делали этот ритуал по копии).
+    Пустая строка после resolve_identity остаётся пустой — «безлично», как и
+    раньше; путь без расширения и None идут в load_policy как есть.
+    """
+    policy = load_policy(Path(path) if path else None)
+    if not policy.identity:
+        policy.identity = resolve_identity()
     return policy
 
 

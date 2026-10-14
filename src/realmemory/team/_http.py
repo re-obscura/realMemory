@@ -14,7 +14,10 @@ import binascii
 import hmac
 import json
 import math
+import sys
 import threading
+import traceback
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
@@ -33,6 +36,20 @@ class BadRequest(Exception):
 
 class PayloadTooLarge(BadRequest):
     """Тело запроса больше лимита: ответ 413."""
+
+
+class EmbedderMismatch(Exception):
+    """Запрос закодирован другим эмбеддером: косинус несравним, честный 409.
+
+    Серверная сторона конвенции (демон поднимает, хендлер превращает в тело
+    {"error": "embedder_mismatch", ...}); клиентская — transport.EmbedderMismatch,
+    разбирающая то же тело у координатора/peer'а."""
+
+    def __init__(self, known: list[str], requested: str) -> None:
+        super().__init__(
+            f"peer работает на {known}, запрос закодирован {requested!r}")
+        self.known = known
+        self.requested = requested
 
 
 def _reject_constant(name: str):
@@ -174,3 +191,40 @@ class TeamHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise BadRequest("ожидается JSON-объект")
         return data
+
+    # -- общая лестница do_POST --------------------------------------------------
+
+    def _read_body(self) -> dict | None:
+        """Тело POST-запроса с сетевыми ответами на битое: 413 при превышении
+        лимита, 400 при битом JSON (текст без префикса — одинаковый контракт
+        координатора и peer'а). None — ответ уже уехал, диспатч прекращён."""
+        try:
+            return self._read_json()
+        except PayloadTooLarge as exc:
+            self._send(413, {"error": str(exc)})
+        except BadRequest as exc:
+            self._send(400, {"error": str(exc)})
+        return None
+
+    def _dispatch(self, route: Callable[[], tuple[int, dict]], *,
+                  bad_request_prefixed: bool = False) -> None:
+        """Единая лестница ошибок маршрута do_POST (у демонов была по копии):
+        BadRequest и (KeyError, TypeError, ValueError) → 400, всё прочее →
+        500 с traceback в stderr. Единственное историческое различие — формат
+        BadRequest из маршрута: координатор отдаёт голый текст (сообщения уже
+        человекочитаемые), peer — с префиксом "bad request: "; флаг
+        bad_request_prefixed сохраняет байты ответов обоих демонов как были."""
+        try:
+            code, payload = route()
+        except PayloadTooLarge as exc:  # из _read_json внутри маршрута
+            self._send(413, {"error": str(exc)})
+        except BadRequest as exc:
+            message = f"bad request: {exc}" if bad_request_prefixed else str(exc)
+            self._send(400, {"error": message})
+        except (KeyError, TypeError, ValueError) as exc:
+            self._send(400, {"error": f"bad request: {exc}"})
+        except Exception:  # noqa: BLE001 - соединению нужен ответ ВСЕГДА
+            traceback.print_exc(file=sys.stderr)
+            self._send(500, {"error": "internal error"})
+        else:
+            self._send(code, payload)

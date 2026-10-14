@@ -122,4 +122,11 @@ def stats_line(store) -> str:  # pragma: no cover - рендер-хелпер CL
             f"ждёт синхронизации {st['awaiting_sync']}")
 
 
-assert STATUS_ACTIVE == "active"  # контракт статуса, на который опираемся
+# Контракт, на который опирается policy.classify (сравнивает rec.status со
+# строкой "active" напрямую): константа не должна разойтись с литералом.
+# Явный raise вместо assert — проверка не исчезает под python -O.
+if STATUS_ACTIVE != "active":  # pragma: no cover - защита от дрейфа константы
+    raise RuntimeError(
+        f"types.STATUS_ACTIVE = {STATUS_ACTIVE!r}, а policy.classify "
+        'сравнивает статус с литералом "active": контракт сломан, '
+        "синхронизируйте константу и литерал")

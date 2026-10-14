@@ -159,15 +159,15 @@ def build_server(hippo, default_project: str | None = None,
             the freshness ("опубликовано N часов/дней назад"). abstained=true
             means nothing published on the topic - say so honestly.
             """
-            import json as _json
-            from pathlib import Path as _Path
+            import json
+            from pathlib import Path
 
             from ..team.recall_team import recall_team as _recall
 
-            answer = _recall(_Path(team_root), query, k=k, author=author,
+            answer = _recall(Path(team_root), query, k=k, author=author,
                              project=project or default_project,
                              policy_path=team_policy_path)
-            return _json.dumps({
+            return json.dumps({
                 "abstained": answer.abstained,
                 "max_age_s": answer.max_age_s,
                 "online": answer.presence_online,
@@ -195,31 +195,13 @@ def build_server(hippo, default_project: str | None = None,
 
 def make_embedder(choice: str = "auto"):
     """Эмбеддер по выбору: local (fastembed ONNX), hashing (детерминированный
-    тестовый) или auto (local при наличии fastembed, иначе hashing)."""
-    if choice == "hashing":
-        from ..encoding.embedder import HashingEmbedder
+    тестовый) или auto (local при наличии fastembed, иначе hashing).
 
-        return HashingEmbedder(dim=256)
-    if choice == "local":
-        from ..encoding.embedder_local import FastEmbedProvider
+    Тонкая обёртка над единой фабрикой encoding.embedder.make_embedder:
+    имя оставлено здесь ради контракта (docs/CONTRACTS.md, api.mcp_server)."""
+    from ..encoding.embedder import make_embedder as _factory
 
-        return FastEmbedProvider()
-    if choice == "auto":
-        try:
-            from ..encoding.embedder_local import FastEmbedProvider
-
-            return FastEmbedProvider()
-        except ImportError:
-            # stdout у stdio-сервера — канал JSON-RPC, диагностика только в stderr
-            print(
-                "[realmemory] fastembed не установлен — используется HashingEmbedder. "
-                "Установите: pip install 'realmemory[local]'",
-                file=sys.stderr,
-            )
-            from ..encoding.embedder import HashingEmbedder
-
-            return HashingEmbedder(dim=256)
-    raise ValueError(f"неизвестный эмбеддер: {choice}")
+    return _factory(choice)
 
 
 def main(argv=None) -> None:
@@ -259,8 +241,7 @@ def main(argv=None) -> None:
     if profile:
         # пороги калиброваны под конкретный эмбеддер (анизотропия моделей);
         # попадут в db_meta.config при первом открытии базы
-        for key, val in profile.items():
-            setattr(cfg, key, float(val))
+        cfg.apply_profile(profile)
     if args.units is not None:
         cfg.n_units = int(args.units)
     if args.k_sparse is not None:

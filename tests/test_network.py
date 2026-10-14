@@ -202,8 +202,15 @@ def test_mcp_tool_hidden_without_coordinator(tmp_path):
     h = Hippocampus.open(tmp_path / "rm", config=_cfg(), clock=FakeClock())
     try:
         server = build_server(h)
-        tools = asyncio.run(server.get_tools()) if hasattr(
-            server, "get_tools") else {}
+        # раньше проверка пряталась за hasattr и при переименовании API
+        # fastmcp превращалась в вакуумный no-op; теперь незнакомый API —
+        # громкий фейл, а не молчаливый пропуск
+        get_tools = getattr(server, "get_tools", None)
+        if get_tools is None and not isinstance(server, FastMCP):
+            raise AssertionError(
+                "fastmcp сменил API получения тулов: обновите этот тест "
+                "осознанно, не оставляя его вакуумным")
+        tools = asyncio.run(get_tools()) if get_tools else {}
         names = set(tools or [])
         # recall_team появляется только при настроенном командном слое
         if isinstance(server, FastMCP):

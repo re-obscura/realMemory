@@ -17,9 +17,10 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from ._http import (
-    BadRequest,
-    PayloadTooLarge,
+    EmbedderMismatch,
     TeamHandler,
     TeamHTTPServer,
     cosine_scores,
@@ -73,12 +74,10 @@ class PeerState:
         """Топ-k по косинусу среди активных публикаций владельца.
 
         Возвращает (хиты, имя эмбеддера владельца); сравнение паритетности —
-        на вызывавшей стороне/хендлере через исключение Mismatch. Строки с
+        на вызывавшей стороне/хендлере через исключение EmbedderMismatch. Строки с
         размерностью, отличной от запроса, несравнимы — пропускаются."""
-        import numpy as np
-
         if embedder and self.embedder_name and embedder != self.embedder_name:
-            raise EmbedderMismatchPeer([self.embedder_name], embedder)
+            raise EmbedderMismatch([self.embedder_name], embedder)
         if project is not None:
             project = self.store.canonical_scope(str(project))
         allowed = self.published_traces()
@@ -108,14 +107,6 @@ class PeerState:
         return hits[:max(1, int(k))], self.embedder_name
 
 
-class EmbedderMismatchPeer(Exception):
-    def __init__(self, known: list[str], requested: str) -> None:
-        super().__init__(
-            f"peer работает на {known}, запрос закодирован {requested!r}")
-        self.known = known
-        self.requested = requested
-
-
 class PeerHandler(TeamHandler):
     server_version = "realmemory-peer/0.8"
 
@@ -132,34 +123,31 @@ class PeerHandler(TeamHandler):
             return self._send(401, {"error": "unauthorized"})
         if path != "/recall":
             return self._send(404, {"error": "not found"})
-        try:
-            payload = self._read_json()
-        except PayloadTooLarge as exc:
-            return self._send(413, {"error": str(exc)})
-        except BadRequest as exc:
-            return self._send(400, {"error": str(exc)})
-        try:
-            embedder = str(payload.get("embedder", ""))
-            if not embedder:
-                # без имени эмбеддера сравнение бессмысленно: честный отказ
-                return self._send(400, {"error": "embedder required"})
-            qvec = decode_vector_b64(payload.get("query_embedding_b64", ""))
-            k = int(payload.get("k") or 5)
-        except (BadRequest, TypeError, ValueError) as exc:
-            return self._send(400, {"error": f"bad request: {exc}"})
+        payload = self._read_body()
+        if payload is None:
+            return None
+        # историческое различие лестниц: peer вешал префикс "bad request: "
+        # и на BadRequest (decode_vector_b64), не только на
+        # KeyError/TypeError/ValueError — флаг сохраняет байты ответов
+        return self._dispatch(lambda: self._route_recall(payload),
+                              bad_request_prefixed=True)
+
+    def _route_recall(self, payload: dict) -> tuple[int, dict]:
+        """Тело маршрута без лестницы ошибок: она общая, в TeamHandler._dispatch."""
+        embedder = str(payload.get("embedder", ""))
+        if not embedder:
+            # без имени эмбеддера сравнение бессмысленно: честный отказ
+            return 400, {"error": "embedder required"}
+        qvec = decode_vector_b64(payload.get("query_embedding_b64", ""))
+        k = int(payload.get("k") or 5)
         try:
             hits, _ = self.state.recall_live(qvec, k, embedder,
                                              payload.get("project"))
-            return self._send(200, {"hits": hits, "live": True})
-        except EmbedderMismatchPeer as exc:
-            return self._send(409, {"error": "embedder_mismatch",
-                                    "known_embedders": exc.known,
-                                    "requested": exc.requested})
-        except Exception:  # noqa: BLE001 - соединению нужен ответ всегда
-            import traceback
-
-            traceback.print_exc(file=sys.stderr)
-            return self._send(500, {"error": "internal error"})
+        except EmbedderMismatch as exc:
+            return 409, {"error": "embedder_mismatch",
+                         "known_embedders": exc.known,
+                         "requested": exc.requested}
+        return 200, {"hits": hits, "live": True}
 
 
 def make_peer_server(root, host="127.0.0.1", port=8410, token=None):

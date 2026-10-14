@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Protocol
+import sys
+from typing import TYPE_CHECKING, Literal, Protocol, overload
 
 import numpy as np
+
+if TYPE_CHECKING:  # pragma: no cover - рантайму не нужен: fastembed импортируется лениво
+    from .embedder_local import FastEmbedProvider
 
 _WORD_RE = re.compile(r"[a-z0-9а-яёäöüß]+", re.IGNORECASE)
 
@@ -77,3 +81,41 @@ class HashingEmbedder:
         if norm > 0.0:
             vec /= norm
         return vec
+
+
+@overload
+def make_embedder(choice: Literal["local"], *,
+                  dim: int | None = None) -> FastEmbedProvider: ...
+@overload
+def make_embedder(choice: Literal["hashing"], *,
+                  dim: int | None = None) -> HashingEmbedder: ...
+@overload
+def make_embedder(choice: str, *, dim: int | None = None) -> EmbeddingProvider: ...
+def make_embedder(choice: str, *, dim: int | None = None) -> EmbeddingProvider:
+    """Единая фабрика эмбеддеров: local (fastembed ONNX), hashing
+    (детерминированный тестовый) или auto (local при наличии fastembed,
+    иначе hashing — диагностика только в stderr: stdout stdio-сервера занят
+    JSON-RPC). dim фиксирует размерность (hashing; у local — вместо пробы
+    модели), None — дефолты провайдеров.
+
+    Живёт в encoding, а не в api.mcp_server: командный recall
+    (team.recall_team) пересобирает эмбеддер базы по тем же правилам."""
+    if choice == "hashing":
+        return HashingEmbedder(dim=256 if dim is None else dim)
+    if choice == "local":
+        from .embedder_local import FastEmbedProvider
+
+        return FastEmbedProvider(dim=dim)
+    if choice == "auto":
+        try:
+            from .embedder_local import FastEmbedProvider
+
+            return FastEmbedProvider(dim=dim)
+        except ImportError:
+            print(
+                "[realmemory] fastembed не установлен — используется HashingEmbedder. "
+                "Установите: pip install 'realmemory[local]'",
+                file=sys.stderr,
+            )
+            return HashingEmbedder(dim=256 if dim is None else dim)
+    raise ValueError(f"неизвестный эмбеддер: {choice}")
