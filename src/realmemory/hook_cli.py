@@ -54,10 +54,10 @@ def cmd_brief(args) -> int:
     from .policies.decay import retention
     from .projects import resolve_project
 
-    hippo = _open(args.path, getattr(args, "namespace", None))
+    hippo = _open(args.path, args.namespace)
     try:
         now = float(hippo.clock.now())
-        project = resolve_project(getattr(args, "project", None))
+        project = resolve_project(args.project)
         if project is not None:
             # вариант написания сходится к живущему скоупу (см. canonical_scope)
             project = hippo.store.canonical_scope(project)
@@ -168,10 +168,10 @@ def _sleep_needed(db: Path) -> bool:
 
 
 def cmd_sleep(args) -> int:
-    root = _resolve_hook_root(Path(args.path), getattr(args, "namespace", None))
+    root = _resolve_hook_root(Path(args.path), args.namespace)
     if not _sleep_needed(root / "memory.db"):
         return 0
-    hippo = _open(args.path, getattr(args, "namespace", None))
+    hippo = _open(args.path, args.namespace)
     try:
         report = hippo.consolidate()
         if args.verbose:
@@ -208,7 +208,7 @@ def _maybe_team_auto_sync(hippo) -> None:
 def _report_hook_error(args, exc: BaseException) -> None:
     """Оставить след об упавшем хуке в журнале событий (best effort)."""
     try:
-        root = _resolve_hook_root(Path(args.path), getattr(args, "namespace", None))
+        root = _resolve_hook_root(Path(args.path), args.namespace)
         con = sqlite3.connect(str(root / "memory.db"), timeout=2)
         try:
             con.execute(
