@@ -10,7 +10,7 @@ from .types import (
     WriteResult,
 )
 
-__version__ = "0.8.2"
+__version__ = "0.9.0"  # единственный источник версии; pyproject читает его динамически
 __all__ = [
     "ConsolidationReport",
     "DecisionAction",

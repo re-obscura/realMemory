@@ -28,8 +28,15 @@ def test_build_server_wire_or_clear_error(tmp_path, tiny_cfg, clock):
             server = m.build_server(hippo)
             assert hasattr(server, "run")
         else:
-            sys.modules.pop("fastmcp", None)
-            with pytest.raises(ImportError, match=r"realmemory\[mcp\]"):
-                m.build_server(hippo)
+            # имитируем отсутствие fastmcp и ОБЯЗАТЕЛЬНО возвращаем модуль:
+            # без восстановления последующие тесты, импортирующие fastmcp,
+            # ломаются в зависимости от порядка запуска
+            saved = sys.modules.pop("fastmcp", None)
+            try:
+                with pytest.raises(ImportError, match=r"realmemory\[mcp\]"):
+                    m.build_server(hippo)
+            finally:
+                if saved is not None:
+                    sys.modules["fastmcp"] = saved
     finally:
         hippo.close()

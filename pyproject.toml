@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "realmemory"
-version = "0.9.0"
+# версия single-source из realmemory.__version__ (setuptools парсит литерал,
+# не импортируя пакет): раньше константа в __init__ отстала от релиза на два
+# минора (0.8.2 против 0.9.0)
+dynamic = ["version"]
 description = "Persistent memory layer for LLM agents: exact-scan hybrid retrieval, associative assembly network, novelty-gated writes, trace decay, sleep-time consolidation."
 readme = "README.md"
 requires-python = ">=3.11"  # typing.Self в hippocampus; 3.10 не поддерживается
@@ -26,6 +29,9 @@ dev = ["pytest>=8.0", "ruff>=0.15,<0.16", "mypy>=1.10"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "realmemory.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
