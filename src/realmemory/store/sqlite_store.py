@@ -21,7 +21,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -375,10 +375,13 @@ class MemoryStore:
         self.path = Path(path)
         self.dim = int(dim)
         self._lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(self.path), check_same_thread=False,
                                          isolation_level=None)
+        except sqlite3.DatabaseError as exc:
+            raise StorageError(f"не удалось открыть {self.path}: {exc}") from exc
+        try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
@@ -402,7 +405,13 @@ class MemoryStore:
                 self._fts_enabled = False
                 self._fts_error = str(exc)
         except sqlite3.DatabaseError as exc:
+            self._conn.close()
             raise StorageError(f"не удалось открыть {self.path}: {exc}") from exc
+        except BaseException:
+            # битая миграция/бэкап не должны оставлять открытое соединение:
+            # на Windows оно держит файловые локи и портит повторные открытия
+            self._conn.close()
+            raise
 
     @contextmanager
     def _txn(self):
@@ -521,6 +530,51 @@ class MemoryStore:
                 (float(base_strength), float(updated_at), int(memory_id)),
             )
             self.bump_memories_rev(con)
+
+    def update_trace_atomic(
+        self,
+        memory_id: int,
+        compute: Callable[[MemoryRecord], tuple[float, int, float, str | None]],
+        *,
+        updated_at: float | None = None,
+        reset_timer: bool = True,
+    ) -> bool:
+        """Чтение записи и запись новой динамики в ОДНОЙ BEGIN IMMEDIATE-транзакции.
+
+        compute получает актуальную строку и возвращает
+        (base_strength, reinforced_count, last_reinforced_at, kind|None);
+        kind=None — тип не менять. Параметры формы записи:
+        reset_timer=True (подкрепление/промоция) пишет last_reinforced_at из
+        compute; reset_timer=False (негативный feedback) таймер не трогает;
+        updated_at по умолчанию следует за last_reinforced_at.
+
+        Атомарность здесь — про деньги: чтение вне транзакции с записью
+        абсолютных значений теряло подкрепления двух одновременно
+        сработавших процессов (об(rec).reinforced_count + 1 вместо N+1).
+        False — след не существует."""
+        with self._txn() as con:
+            row = con.execute(
+                f"SELECT {_COLS} FROM memories WHERE id=?", (int(memory_id),)
+            ).fetchone()
+            if row is None:
+                return False
+            rec = _row_to_record(row, self.dim)
+            base, count, last_reinforced, kind = compute(rec)
+            # updated_at по умолчанию следует за ВЫЧИСЛЕННЫМ таймером (как
+            # update_trace), а не за старым значением строки
+            stamp = float(last_reinforced if updated_at is None else updated_at)
+            sets = "base_strength=?, reinforced_count=?, updated_at=?"
+            params: list = [float(base), int(count), stamp]
+            if reset_timer:
+                sets += ", last_reinforced_at=?"
+                params.append(float(last_reinforced))
+            if kind is not None and kind != rec.kind:
+                sets += ", kind=?"
+                params.append(kind)
+            params.append(int(memory_id))
+            con.execute(f"UPDATE memories SET {sets} WHERE id=?", params)
+            self.bump_memories_rev(con)
+        return True
 
     def max_updated_at(self) -> float | None:
         with self._lock:

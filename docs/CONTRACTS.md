@@ -258,6 +258,15 @@ class MemoryStore(path, dim):                        # context manager; WAL + bu
     def get_many(ids) -> list[MemoryRecord]                  # order as given, missing skipped
     def update_trace(id, base_strength, reinforced_count, last_reinforced_at, kind=None) -> None
     def adjust_base(id, base_strength, updated_at) -> None   # weakening without timer reset
+    def update_trace_atomic(id, compute, *, updated_at=None, reset_timer=True) -> bool
+                                                             # read + write of trace dynamics in one
+                                                             # BEGIN IMMEDIATE — concurrent reinforcers
+                                                             # never lose each other's increments;
+                                                             # compute(persisted record) returns
+                                                             # (base, count, last_reinforced_at, kind|None),
+                                                             # kind=None keeps the type; reset_timer=False
+                                                             # leaves last_reinforced_at untouched;
+                                                             # false when the trace is missing
     def mark_superseded(id, by_id, when) -> None
     def forget_traces(memory_ids) -> int                     # physical delete of traces
                                                              # forgotten below the recall floor;

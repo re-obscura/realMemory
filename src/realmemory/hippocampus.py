@@ -535,17 +535,20 @@ class Hippocampus:
         self.store.elig_add(ii, jj, strength, now, source_ids)
         return int(ii.size)
 
-    def _reinforce(self, memory_id: int, now: float) -> None:
-        rec = self.store.get(memory_id)
-        if rec is None:
-            return
-        base, count = reinforce_values(rec.base_strength, rec.reinforced_count, self.config)
-        new_kind = (
-            KIND_SEMANTIC
-            if should_promote(rec.kind, count, rec.created_at, now, self.config)
-            else rec.kind
-        )
-        self.store.update_trace(memory_id, base, count, now, kind=new_kind)
+    def _reinforce(self, memory_id: int, now: float) -> bool:
+        def bump(rec: MemoryRecord) -> tuple[float, int, float, str | None]:
+            base, count = reinforce_values(rec.base_strength, rec.reinforced_count,
+                                           self.config)
+            kind = (
+                KIND_SEMANTIC
+                if should_promote(rec.kind, count, rec.created_at, now, self.config)
+                else None
+            )
+            return base, count, now, kind
+
+        # чтение и запись в одной транзакции: два процесса, подкрепляющие один
+        # след, не должны терять инкременты друг друга
+        return self.store.update_trace_atomic(memory_id, bump)
 
     @property
     def pending_eligibility(self) -> int:
@@ -972,15 +975,19 @@ class Hippocampus:
         now = float(self.clock.now())
         reinforced = weakened = 0
         for i in uniq:
-            rec = self.store.get(i)
-            if rec is None:
-                continue
             if reward > 0.0:
-                self._reinforce(i, now)
-                reinforced += 1
+                if self._reinforce(i, now):
+                    reinforced += 1
             elif reward < 0.0:
-                self.store.adjust_base(i, weaken_value(rec.base_strength, reward), now)
-                weakened += 1
+                weaken = self.store.update_trace_atomic(
+                    i,
+                    lambda rec: (weaken_value(rec.base_strength, reward),
+                                 rec.reinforced_count, rec.last_reinforced_at, None),
+                    updated_at=now,
+                    reset_timer=False,
+                )
+                if weaken:
+                    weakened += 1
         self._refresh_rev_marker()
         self.journal.append(
             "feedback",
@@ -1069,12 +1076,13 @@ class Hippocampus:
             ):
                 forgotten_ids.append(tid)
         for rid in promote_ids:
-            promoted_rec = self.store.get(rid)
-            if promoted_rec is not None:
-                self.store.update_trace(
-                    rid, promoted_rec.base_strength, promoted_rec.reinforced_count,
-                    promoted_rec.last_reinforced_at, kind=KIND_SEMANTIC,
-                )
+            # атомарно: подкрепление чужого процесса, влетевшее между сканом
+            # и промоцией, не затирается устаревшими абсолютными значениями
+            self.store.update_trace_atomic(
+                rid,
+                lambda rec: (rec.base_strength, rec.reinforced_count,
+                             rec.last_reinforced_at, KIND_SEMANTIC),
+            )
         if forgotten_ids:
             self.store.forget_traces(forgotten_ids)
             # протокол отзыва: след забыт локально — активные публикации получают
